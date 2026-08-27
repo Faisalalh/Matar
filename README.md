@@ -4,7 +4,7 @@ A single-page bookkeeping tool for a property office. Drop in a bank statement
 (Excel or CSV) and it categorises every line, reconciles paperwork against the
 bank, shows the totals, and projects the next twelve months.
 
-**Live:** https://faisalalh.github.io/matar-ledger/
+**Live:** https://faisalalh.github.io/Matar/
 
 Everything runs in the browser. The ledger is stored in that browser's own
 storage and never leaves the device — this repository contains the application
