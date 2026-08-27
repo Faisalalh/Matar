@@ -1071,12 +1071,25 @@ $('btnPlayRef').addEventListener('click',()=>playMix(true,false));
 $('btnPlayTake').addEventListener('click',()=>playMix(false,true));
 $('btnStopMix').addEventListener('click',()=>{ stopAllPlayback(); drawCompare(S.lastScore); });
 $('mixVol').addEventListener('input',()=>{});
-$('btnWav').addEventListener('click',()=>{
+/* When hosted as a claude.ai preview, downloads go through the viewer's save
+   dialog instead of an <a download> link, which that sandbox ignores. */
+const dlCap=(window.claude&&window.claude.use)?window.claude.use('downloads').catch(()=>null):Promise.resolve(null);
+$('btnWav').addEventListener('click',async()=>{
   if(!S.take) return;
   const blob=encodeWav(S.take.pcm,S.take.sr);
+  const name='take-'+(S.clip.name||'clip').replace(/[^\w.-]+/g,'_').replace(/\.\w+$/,'')+'.wav';
+  const dl=await dlCap;
+  if(dl){
+    try{ await dl.save({filename:name,data:blob}); setStatus($('matchStatus'),'Take saved.','ok'); }
+    catch(err){
+      if(err&&err.code==='declined'){}
+      else setStatus($('matchStatus'),'This preview can’t save .wav files — open the full version from the repo to export takes.');
+    }
+    return;
+  }
   const aEl=document.createElement('a');
   aEl.href=URL.createObjectURL(blob);
-  aEl.download='take-'+(S.clip.name||'clip').replace(/[^\w.-]+/g,'_').replace(/\.\w+$/,'')+'.wav';
+  aEl.download=name;
   document.body.appendChild(aEl); aEl.click(); aEl.remove();
   setTimeout(()=>URL.revokeObjectURL(aEl.href),4000);
 });
