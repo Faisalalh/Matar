@@ -70,6 +70,8 @@ label.opt{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font
 label.opt input{accent-color:var(--you)}
 input[type=range]{accent-color:var(--ref);width:110px}
 select{background:var(--inset);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:7px 9px;font-family:inherit;font-size:13.5px;max-width:230px}
+input.txt{background:var(--inset);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-family:inherit;font-size:14.5px;flex:1;min-width:200px}
+input.txt::placeholder{color:var(--faint)}
 .mono{font-family:'Spline Sans Mono',monospace;font-variant-numeric:tabular-nums}
 .status{font-size:13.5px;color:var(--muted);min-height:1.4em;margin-top:10px}
 .status.err{color:var(--bad)}
@@ -157,11 +159,13 @@ a{color:var(--muted)}
   </div>
   <input type="file" id="file" accept="audio/*,video/*" hidden>
   <div class="row" style="margin-top:12px">
-    <button class="btn amber" id="btnDemo">Use the demo line</button>
-    <span class="status" id="clipStatus" aria-live="polite" style="margin:0"></span>
+    <input type="url" class="txt" id="ytUrl" placeholder="…or paste a YouTube link" spellcheck="false" aria-label="YouTube link">
+    <button class="btn amber" id="btnYt">Fetch audio</button>
+    <button class="btn" id="btnDemo">Use the demo line</button>
   </div>
+  <div class="row"><span class="status" id="clipStatus" aria-live="polite" style="margin:0"></span></div>
   <div class="clipinfo" id="clipInfo"></div>
-  <p class="ythint">From YouTube: browsers can&rsquo;t pull audio straight off YouTube, so for clips you have the right to use, save the audio first (e.g. <code>yt-dlp -x URL</code>) and drop the file here.</p>
+  <p class="ythint">YouTube links are fetched through public privacy mirrors (Piped / Invidious) &mdash; use them for clips you have the right to use. YouTube fights these mirrors, so a fetch can fail on some videos or days; when it does, save the audio yourself (e.g. <code>yt-dlp -x URL</code>) and drop the file here.</p>
 </section>
 
 <section class="panel" id="panel-booth" hidden>
@@ -263,6 +267,7 @@ const S = {
   actx:null, clip:null, sel:{a:0,b:0}, take:null, offsetFrames:0,
   recording:false, preview:null, mix:[], micStream:null, micId:'',
   peaksCache:null, livePeaksCache:null,
+  loadTok:0, ytBusy:false, ytCtrls:new Set(),
 };
 
 function ensureCtx(){
@@ -445,6 +450,107 @@ function encodeWav(f32, sr){
   wr(36,'data'); v.setUint32(40,n*2,true);
   for(let i=0;i<n;i++){ const s=clamp(f32[i],-1,1); v.setInt16(44+i*2, s<0?s*0x8000:s*0x7fff, true); }
   return new Blob([buf],{type:'audio/wav'});
+}
+
+/* Minimal MP4 demuxer: pull the AAC audio track out of an MP4/M4A and rewrap
+   it as an ADTS stream, which decodeAudioData accepts even when the container
+   (a muxed audio+video file) is refused. Tolerates truncated files as long as
+   moov precedes mdat (faststart), decoding whatever samples are present. */
+function extractAacAdts(buf){
+  const u8=new Uint8Array(buf), dv=new DataView(buf);
+  const len=u8.length;
+  const rd32=o=>dv.getUint32(o);
+  const type=o=>String.fromCharCode(u8[o],u8[o+1],u8[o+2],u8[o+3]);
+  function* boxes(start,end){
+    let o=start;
+    while(o+8<=end){
+      let sz=rd32(o), hdr=8;
+      const t=type(o+4);
+      if(sz===1){ sz=Number(dv.getBigUint64(o+8)); hdr=16; }
+      else if(sz===0) sz=end-o;
+      if(sz<hdr||o+sz>end+16) break;
+      yield {t, body:o+hdr, end:Math.min(o+sz,end)};
+      o+=sz;
+    }
+  }
+  function find(start,end,t){ for(const b of boxes(start,end)) if(b.t===t) return b; return null; }
+  function path(start,end,names){
+    let s=start,e=end;
+    for(const n of names){ const b=find(s,e,n); if(!b) return null; s=b.body; e=b.end; }
+    return {body:s,end:e};
+  }
+  const moov=find(0,len,'moov');
+  if(!moov) throw new Error('no moov (file truncated before index?)');
+  for(const trak of boxes(moov.body,moov.end)){
+    if(trak.t!=='trak') continue;
+    const mdia=find(trak.body,trak.end,'mdia');
+    if(!mdia) continue;
+    const hdlr=find(mdia.body,mdia.end,'hdlr');
+    if(!hdlr||type(hdlr.body+8)!=='soun') continue;
+    const stbl=path(mdia.body,mdia.end,['minf','stbl']);
+    if(!stbl) continue;
+    const stsd=find(stbl.body,stbl.end,'stsd');
+    if(!stsd) continue;
+    const entry={t:type(stsd.body+12), body:stsd.body+16, end:stsd.body+8+rd32(stsd.body+8)};
+    if(entry.t!=='mp4a') continue;
+    // mp4a sample entry: 6 reserved + 2 dataRef + 20 audio fields, then child
+    // boxes (a version-1 QT entry carries 16 extra bytes before them)
+    const esds=find(entry.body+28,entry.end,'esds')||find(entry.body+44,entry.end,'esds');
+    if(!esds) throw new Error('aac config (esds) missing');
+    let o=esds.body+4, asc=null;
+    const rdLen=()=>{ let l=0,b2; do{ b2=u8[o++]; l=(l<<7)|(b2&0x7f); }while(b2&0x80); return l; };
+    while(o<esds.end&&!asc){
+      const tag=u8[o++], l=rdLen(), bodyStart=o;
+      if(tag===3){ o+=3; continue; }
+      if(tag===4){ o+=13; continue; }
+      if(tag===5){ asc=[u8[o],u8[o+1]]; break; }
+      o=bodyStart+l;
+    }
+    if(!asc) throw new Error('aac config (asc) missing');
+    let objType=asc[0]>>3;
+    const freqIdx=((asc[0]&7)<<1)|(asc[1]>>7);
+    const chanCfg=(asc[1]>>3)&0xf;
+    if(objType===31||freqIdx===15) throw new Error('unusual aac config');
+    if(objType===5||objType===29) objType=2;   // HE-AAC: decode the LC core
+    const profile=(objType-1)&3;
+    const stsz=find(stbl.body,stbl.end,'stsz');
+    const stsc=find(stbl.body,stbl.end,'stsc');
+    const stco=find(stbl.body,stbl.end,'stco')||find(stbl.body,stbl.end,'co64');
+    if(!stsz||!stsc||!stco) throw new Error('sample tables missing');
+    const uniform=rd32(stsz.body+4), nSamples=rd32(stsz.body+8);
+    const sizeAt=i=>uniform||rd32(stsz.body+12+i*4);
+    const nChunks=rd32(stco.body+4);
+    const co64=find(stbl.body,stbl.end,'co64');
+    const use64=!!co64&&stco.body===co64.body;
+    const chunkOff=i=>use64?Number(dv.getBigUint64(stco.body+8+i*8)):rd32(stco.body+8+i*4);
+    const nRuns=rd32(stsc.body+4);
+    const run=i=>({first:rd32(stsc.body+8+i*12), spc:rd32(stsc.body+12+i*12)});
+    let total=0;
+    for(let i=0;i<nSamples;i++) total+=sizeAt(i)+7;
+    const out=new Uint8Array(total);
+    let w=0,s=0,ri=0;
+    for(let c=0;c<nChunks&&s<nSamples;c++){
+      while(ri+1<nRuns&&run(ri+1).first<=c+1) ri++;
+      const spc=run(ri).spc;
+      let off=chunkOff(c);
+      for(let k=0;k<spc&&s<nSamples;k++,s++){
+        const sz=sizeAt(s);
+        if(off+sz>len){ s=nSamples; break; }    // truncated download: stop cleanly
+        const fl=sz+7;
+        out[w]=0xff; out[w+1]=0xf1;
+        out[w+2]=(profile<<6)|(freqIdx<<2)|((chanCfg>>2)&1);
+        out[w+3]=((chanCfg&3)<<6)|((fl>>11)&3);
+        out[w+4]=(fl>>3)&0xff;
+        out[w+5]=((fl&7)<<5)|0x1f;
+        out[w+6]=0xfc;
+        out.set(u8.subarray(off,off+sz),w+7);
+        w+=fl; off+=sz;
+      }
+    }
+    if(w<7+64) throw new Error('no audio samples present');
+    return out.subarray(0,w);
+  }
+  throw new Error('no aac audio track found');
 }
 
 /* ============================== canvas plumbing ============================== */
@@ -704,7 +810,8 @@ function drawCompare(sc){
 }
 
 /* ============================== clip loading ============================== */
-async function loadClipFromBuffer(buffer, name){
+async function loadClipFromBuffer(buffer, name, tok){
+  if(tok!==undefined && tok!==S.loadTok) return;
   stopAllPlayback();
   const mono=monoOf(buffer);
   let peak=0; for(let i=0;i<mono.length;i++){ const a=Math.abs(mono[i]); if(a>peak) peak=a; }
@@ -713,6 +820,7 @@ async function loadClipFromBuffer(buffer, name){
   const st=$('clipStatus');
   const analysis=await analyzeSamples(mono16k.subarray(0,capped), AN.SR,
     p=>setStatus(st,'Reading the clip’s pitch… '+Math.round(p*100)+'%'));
+  if(tok!==undefined && tok!==S.loadTok) return;
   S.clip={name, buffer, mono16k, peak, analysis, pitchRange:pitchRange(analysis.pitch)};
   S.peaksCache=null; S.livePeaksCache=null; S.take=null;
   const dur=buffer.duration;
@@ -731,14 +839,16 @@ async function loadClipFromBuffer(buffer, name){
 
 async function loadFile(file){
   const st=$('clipStatus');
+  ytCancel(true);
+  const tok=++S.loadTok;
   try{
     setStatus(st,'Decoding '+file.name+'…');
     ensureCtx();
     const buf=await file.arrayBuffer();
     const audio=await S.actx.decodeAudioData(buf);
-    await loadClipFromBuffer(audio, file.name);
+    await loadClipFromBuffer(audio, file.name, tok);
   }catch(err){
-    setStatus(st,'Couldn’t decode that file — try mp3, wav, m4a, ogg, or an mp4 with an audio track.','err');
+    if(tok===S.loadTok) setStatus(st,'Couldn’t decode that file — try mp3, wav, m4a, ogg, or an mp4 with an audio track.','err');
   }
 }
 
@@ -789,10 +899,184 @@ $('file').addEventListener('change',e=>{ if(e.target.files[0]) loadFile(e.target
 $('drop').addEventListener('drop',e=>{ const f=e.dataTransfer.files&&e.dataTransfer.files[0]; if(f) loadFile(f); });
 $('btnDemo').addEventListener('click',async()=>{
   ensureCtx();
+  ytCancel(true);
+  const tok=++S.loadTok;
   setStatus($('clipStatus'),'Singing the demo line…');
   const buf=await makeDemo();
-  await loadClipFromBuffer(buf,'Demo line (synth voice)');
+  await loadClipFromBuffer(buf,'Demo line (synth voice)',tok);
 });
+
+/* ============================== YouTube fetch ============================== */
+/* Browsers can't reach YouTube directly, so links are fetched through public
+   privacy mirrors (Piped / Invidious). Instances rot, so the seeds below are
+   merged with each network's live instance directory at fetch time. Self-host
+   override: set window.DUB_YT_SOURCES = {piped:[...], invidious:[...]}. */
+const YT={
+  piped:['https://api.piped.private.coffee','https://pipedapi.adminforge.de','https://pipedapi.ducks.party','https://api.piped.privacydev.net','https://pipedapi.darkness.services'],
+  invidious:['https://inv.nadeko.net','https://yewtu.be','https://invidious.f5.si','https://invidious.nerdvpn.de','https://invidious.tiekoetter.com'],
+  pipedDir:'https://piped-instances.kavin.rocks/',
+  invDir:'https://api.invidious.io/instances.json?sort_by=type,health',
+  maxBytes:100*1024*1024, maxSec:1200, maxTries:10,
+};
+function ytId(text){
+  const t=(text||'').trim();
+  if(/^[A-Za-z0-9_-]{11}$/.test(t)) return t;
+  const m=t.match(/youtu\.be\/([A-Za-z0-9_-]{11})/)||t.match(/[?&]v=([A-Za-z0-9_-]{11})/)||t.match(/\/(?:shorts|embed|live|v)\/([A-Za-z0-9_-]{11})/);
+  return m?m[1]:null;
+}
+function fetchT(url,ms,opts){
+  const ctrl=new AbortController(); S.ytCtrls.add(ctrl);
+  const to=setTimeout(()=>ctrl.abort(),ms);
+  return fetch(url,{...(opts||{}),signal:ctrl.signal}).finally(()=>{ clearTimeout(to); S.ytCtrls.delete(ctrl); });
+}
+const ytAbs=(base,u)=>/^https?:/i.test(u)?u:base+(u.startsWith('/')?'':'/')+u;
+function shortYtErr(s){
+  s=String(s||'');
+  if(/not a bot|LOGIN_REQUIRED|Sign in/i.test(s)) return 'blocked by YouTube';
+  if(/unavailable|private|removed/i.test(s)) return 'video unavailable';
+  return s.slice(0,80);
+}
+async function ytSources(){
+  const cfg=window.DUB_YT_SOURCES||{};
+  if(cfg.piped||cfg.invidious) return {piped:cfg.piped||[], invidious:cfg.invidious||[]};
+  const piped=[...YT.piped], inv=[];
+  await Promise.all([
+    fetchT(YT.pipedDir,4000).then(r=>r.json()).then(list=>{ for(const it of list) if(it&&it.api_url) piped.push(String(it.api_url).replace(/\/+$/,'')); }).catch(()=>{}),
+    fetchT(YT.invDir,4000).then(r=>r.json()).then(list=>{ for(const row of list){ const info=row&&row[1]; if(info&&info.type==='https'&&info.uri) inv.push(String(info.uri).replace(/\/+$/,'')); } }).catch(()=>{}),
+  ]);
+  inv.push(...YT.invidious);
+  const seen=new Set(), dd=a=>a.filter(u=>!seen.has(u)&&seen.add(u));
+  return {piped:dd(piped), invidious:dd(inv)};
+}
+async function pipedMeta(base,id){
+  const r=await fetchT(base+'/streams/'+id,8000,{headers:{accept:'application/json'}});
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  const d=await r.json();
+  if(d.error) throw new Error(shortYtErr(d.error));
+  if(d.livestream) throw new Error('live stream');
+  const fs=[];
+  for(const a of d.audioStreams||[]) if(a.url) fs.push({url:ytAbs(base,a.url),mime:a.mimeType||'',br:+a.bitrate||0,kind:'audio'});
+  for(const v of d.videoStreams||[]) if(v.url&&!v.videoOnly&&/mp4/i.test(v.mimeType||'')) fs.push({url:ytAbs(base,v.url),mime:v.mimeType,br:+v.bitrate||0,kind:'muxed'});
+  return {title:d.title||('YouTube '+id), dur:+d.duration||0, formats:fs};
+}
+async function invMeta(base,id){
+  const r=await fetchT(base+'/api/v1/videos/'+id+'?local=true',8000,{headers:{accept:'application/json'}});
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  const d=await r.json();
+  if(d.error) throw new Error(shortYtErr(d.error));
+  if(d.liveNow) throw new Error('live stream');
+  const fs=[];
+  for(const a of d.adaptiveFormats||[]) if(a.url&&/^audio\//.test(a.type||'')) fs.push({url:ytAbs(base,a.url),mime:a.type,br:+a.bitrate||0,kind:'audio'});
+  for(const v of d.formatStreams||[]) if(v.url&&/mp4/.test(v.type||'')) fs.push({url:ytAbs(base,v.url),mime:v.type,br:+v.bitrate||0,kind:'muxed'});
+  return {title:d.title||('YouTube '+id), dur:+d.lengthSeconds||0, formats:fs};
+}
+function sortFormats(fs,canWebm){
+  const rank=f=>{
+    let r=f.kind==='audio'?0:1000;
+    const mp4=/mp4|m4a|aac/i.test(f.mime);
+    if(!canWebm&&!mp4) r+=500;
+    return r-Math.min(400,(f.br||0)/1000);
+  };
+  return fs.slice().sort((a,b)=>rank(a)-rank(b));
+}
+async function downloadBytes(url,onProg){
+  const ctrl=new AbortController(); S.ytCtrls.add(ctrl);
+  let idle=setTimeout(()=>ctrl.abort(),20000);
+  const bump=()=>{ clearTimeout(idle); idle=setTimeout(()=>ctrl.abort(),20000); };
+  try{
+    const r=await fetch(url,{signal:ctrl.signal});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    if(/text\/html/i.test(r.headers.get('content-type')||'')) throw new Error('not a media response');
+    const total=+(r.headers.get('content-length')||0);
+    if(!r.body) return {bytes:await r.arrayBuffer(), truncated:false};
+    const reader=r.body.getReader(), chunks=[]; let got=0, truncated=false;
+    for(;;){
+      const {done,value}=await reader.read();
+      if(done) break;
+      bump();
+      chunks.push(value); got+=value.length;
+      if(onProg) onProg(got,total);
+      if(got>YT.maxBytes){ truncated=true; try{ctrl.abort();}catch(_){} break; }
+    }
+    const out=new Uint8Array(got); let o=0;
+    for(const c of chunks){ out.set(c,o); o+=c.length; }
+    return {bytes:out.buffer, truncated};
+  } finally { clearTimeout(idle); S.ytCtrls.delete(ctrl); }
+}
+async function decodeMedia(bytes,mime){
+  const a=ensureCtx();
+  try{ return await a.decodeAudioData(bytes.slice(0)); }
+  catch(e1){
+    if(/mp4|m4a|aac/i.test(mime||'')){
+      const adts=extractAacAdts(bytes);
+      return await a.decodeAudioData(adts.buffer.slice(adts.byteOffset,adts.byteOffset+adts.byteLength));
+    }
+    throw e1;
+  }
+}
+const fmtMB=n=>(n/1048576).toFixed(1)+' MB';
+function ytBusy(b){ S.ytBusy=b; $('btnYt').textContent=b?'Cancel':'Fetch audio'; }
+function ytCancel(silent){
+  if(!S.ytBusy) return;
+  S.loadTok++;
+  for(const c of S.ytCtrls){ try{c.abort();}catch(_){} }
+  S.ytCtrls.clear();
+  ytBusy(false);
+  if(!silent) setStatus($('clipStatus'),'Fetch cancelled.');
+}
+async function loadYouTube(url){
+  const st=$('clipStatus');
+  if(window.claude&&window.claude.use){ setStatus(st,'This claude.ai preview can’t reach YouTube — open Dub Booth from the repo or GitHub Pages to paste links, or drop a file here.','err'); return; }
+  const id=ytId(url);
+  if(!id){ setStatus(st,'That doesn’t look like a YouTube link — paste a full video URL.','err'); return; }
+  const tok=++S.loadTok;
+  ensureCtx();
+  ytBusy(true);
+  let botWalled=false, tooLong=0;
+  try{
+    setStatus(st,'Finding a live mirror…');
+    const src=await ytSources();
+    if(tok!==S.loadTok) return;
+    const tries=[...src.piped.map(b=>({b,kind:'piped'})),...src.invidious.map(b=>({b,kind:'inv'}))].slice(0,YT.maxTries);
+    const canWebm=!!document.createElement('audio').canPlayType('audio/webm; codecs="opus"');
+    const hostOf=b=>b.replace(/^https?:\/\//,'');
+    // race mirrors three at a time; the first ones that answer with streams win
+    const candidates=[];
+    for(let i=0;i<tries.length&&!candidates.length&&!tooLong;i+=3){
+      if(tok!==S.loadTok) return;
+      const wave=tries.slice(i,i+3);
+      setStatus(st,'Asking '+wave.map(t=>hostOf(t.b)).join(' · ')+'…');
+      const rs=await Promise.allSettled(wave.map(t=>(t.kind==='piped'?pipedMeta(t.b,id):invMeta(t.b,id)).then(m=>({t,m}))));
+      for(const r of rs){
+        if(r.status==='rejected'){ if(/blocked by YouTube/.test(String(r.reason&&r.reason.message))) botWalled=true; continue; }
+        if(r.value.m.dur>YT.maxSec){ tooLong=r.value.m.dur; break; }
+        if(r.value.m.formats.length) candidates.push(r.value);
+      }
+    }
+    for(const c of candidates.slice(0,3)){
+      const host=hostOf(c.t.b);
+      for(const f of sortFormats(c.m.formats,canWebm).slice(0,2)){
+        if(tok!==S.loadTok) return;
+        try{
+          const dl=await downloadBytes(f.url,(got,total)=>{ if(tok===S.loadTok) setStatus(st,'Downloading from '+host+'… '+fmtMB(got)+(total?' of '+fmtMB(total):'')); });
+          if(tok!==S.loadTok) return;
+          setStatus(st,'Decoding audio…');
+          const audio=await decodeMedia(dl.bytes,f.mime);
+          if(tok!==S.loadTok) return;
+          await loadClipFromBuffer(audio, c.m.title, tok);
+          if(tok===S.loadTok&&dl.truncated) setStatus($('boothStatus'),'That video was big — loaded the first '+fmtT(audio.duration)+' of it.');
+          return;
+        }catch(e){ /* dead stream or undecodable format: fall through to the next */ }
+      }
+    }
+    if(tok!==S.loadTok) return;
+    if(tooLong) setStatus(st,'That video is '+Math.round(tooLong/60)+' min long — dub lines work best short. Save just the bit you need (yt-dlp -x URL) and drop it here.','err');
+    else if(botWalled) setStatus(st,'YouTube is blocking the public mirrors for this video right now. Try again in a few minutes, try another video, or save the audio (yt-dlp -x URL) and drop the file here.','err');
+    else setStatus(st,'Couldn’t fetch that video through any public mirror right now. Save the audio (yt-dlp -x URL) and drop the file here instead.','err');
+  } finally { if(tok===S.loadTok) ytBusy(false); }
+}
+$('btnYt').addEventListener('click',()=>{ if(S.ytBusy) ytCancel(false); else loadYouTube($('ytUrl').value); });
+$('ytUrl').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!S.ytBusy){ e.preventDefault(); loadYouTube($('ytUrl').value); } });
 
 /* ============================== booth playback ============================== */
 function stopAllPlayback(){

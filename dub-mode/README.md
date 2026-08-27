@@ -12,11 +12,18 @@ from disk.)
 
 ## How it works
 
-1. **Clip** — drop any audio or video file (mp3, wav, m4a, ogg, mp4, webm), or
-   press *Use the demo line* for a built-in synthesized phrase. For YouTube
-   material you have the right to use, save the audio first (e.g.
-   `yt-dlp -x URL`) and drop the file in — browsers can't fetch YouTube
-   directly.
+1. **Clip** — drop any audio or video file (mp3, wav, m4a, ogg, mp4, webm),
+   paste a YouTube link, or press *Use the demo line* for a built-in
+   synthesized phrase. YouTube links are fetched in the browser through public
+   privacy mirrors (Piped / Invidious): live instances are discovered from
+   each network's directory at fetch time, three are raced at once, audio-only
+   streams are preferred, and when a mirror only offers the muxed mp4 the AAC
+   track is demuxed out client-side (a ~100-line MP4→ADTS extractor) so it
+   still decodes. Use it for clips you have the right to use. YouTube actively
+   fights these mirrors, so a fetch can fail on some videos or days — the
+   fallback is saving the audio yourself (e.g. `yt-dlp -x URL`) and dropping
+   the file in. Self-hosters can pin their own mirror before the page loads:
+   `window.DUB_YT_SOURCES = {piped:['https://my.instance'], invidious:[]}`.
 2. **Booth** — the amber waveform is the clip's loudness; the dotted trace
    under it is the melody of the words. Drag to select the exact line to dub.
 3. **Record** — a three-beep count-in, then a playhead sweeps the line while
@@ -31,8 +38,9 @@ from disk.)
 
 ## Tech notes
 
-- One self-contained `index.html`; no build step, no dependencies, no network
-  use except Google Fonts. All audio stays in the browser — nothing uploads.
+- One self-contained `index.html`; no build step, no dependencies. Network use
+  is Google Fonts plus, only when you paste a YouTube link, the public mirrors
+  above. Your microphone audio never leaves the browser.
 - Pitch tracking is a normalized-autocorrelation (NSDF/MPM-style) detector run
   on a 16 kHz mono downmix, 10 ms frames; loudness is framewise RMS.
 - Alignment is envelope cross-correlation (±600 ms), with manual nudge on top.
