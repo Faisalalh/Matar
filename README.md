@@ -1,4 +1,4 @@
-# Matar Bin Tartan Real Estate — Financial Workbench
+# Matar Bin Taryam Real Estate — Financial Workbench
 
 A single-page bookkeeping tool for a property office. Drop in a bank statement
 (Excel or CSV) and it categorises every line, reconciles paperwork against the
