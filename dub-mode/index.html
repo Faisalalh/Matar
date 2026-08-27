@@ -72,6 +72,14 @@ input[type=range]{accent-color:var(--ref);width:110px}
 select{background:var(--inset);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:7px 9px;font-family:inherit;font-size:13.5px;max-width:230px}
 input.txt{background:var(--inset);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-family:inherit;font-size:14.5px;flex:1;min-width:200px}
 input.txt::placeholder{color:var(--faint)}
+
+/* ---------- transcript ---------- */
+.capnow{min-height:1.5em;font-size:15.5px;font-weight:600;color:var(--text);margin-top:10px}
+.capnow .dim{color:var(--faint);font-weight:400;font-size:13.5px}
+.capbar{display:flex;gap:6px;overflow-x:auto;padding:3px 1px;margin-top:10px;scrollbar-width:thin}
+.cap{flex:none;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:inherit;font-size:13px;padding:5px 11px;border-radius:999px;border:1px solid var(--line);background:var(--inset);color:var(--muted);cursor:pointer}
+.cap:hover{border-color:var(--ref);color:var(--text)}
+.cap.on{background:rgba(255,180,84,.14);border-color:var(--ref);color:var(--text)}
 .mono{font-family:'Spline Sans Mono',monospace;font-variant-numeric:tabular-nums}
 .status{font-size:13.5px;color:var(--muted);min-height:1.4em;margin-top:10px}
 .status.err{color:var(--bad)}
@@ -174,11 +182,20 @@ a{color:var(--muted)}
   </div>
   <p class="panel-sub">Drag across the wave to pick the exact line you&rsquo;ll dub. The amber shape is the clip&rsquo;s loudness; the dotted trace under it is the melody of the words.</p>
   <div class="canvas-shell"><canvas id="wave" aria-label="Clip waveform and pitch trace. Drag to select a region."></canvas></div>
+  <div class="capnow" id="capNow" hidden></div>
   <div class="row" style="margin-top:12px">
     <button class="btn primary" id="btnPlaySel">&#9654; Play selection</button>
     <button class="btn" id="btnStopSel">&#9632; Stop</button>
     <button class="btn ghost small" id="btnSelAll">Select all</button>
     <span class="mono" id="selLabel" style="color:var(--muted);font-size:13px"></span>
+  </div>
+  <div class="capbar" id="capBar" hidden></div>
+  <div class="row" style="margin-top:10px">
+    <select id="capSel" aria-label="Caption language" hidden></select>
+    <input type="text" class="txt" id="capText" placeholder="Type the words of this line (optional)" style="min-width:170px">
+    <button class="btn small" id="btnCapSet">Set words</button>
+    <button class="btn small ghost" id="btnCapFile">Load .srt / .vtt</button>
+    <input type="file" id="capFile" accept=".srt,.vtt,.ttml,.xml,text/vtt,text/plain" hidden>
   </div>
   <div class="status" id="boothStatus" aria-live="polite"></div>
 </section>
@@ -190,6 +207,7 @@ a{color:var(--muted)}
   <p class="panel-sub">Three beeps count you in, then the playhead sweeps the line. Speak with it &mdash; ride the amber shape with your volume and slide your pitch onto the amber dots.</p>
   <div class="row">
     <button class="btn rec" id="btnRec">&#9679; Record take</button>
+    <button class="btn" id="btnReh">Rehearse (no mic)</button>
     <label class="opt"><input type="checkbox" id="chkMonitor" checked> Hear the clip</label>
     <input type="range" id="monVol" min="0" max="100" value="70" aria-label="Clip volume while recording">
     <label class="opt" title="With headphones on, the raw mic is recorded. Without them, echo-cancellation keeps the clip out of your take."><input type="checkbox" id="chkHead"> Headphones on (raw mic)</label>
@@ -689,6 +707,7 @@ function drawBooth(){
     const dur=S.clip.buffer.duration;
     if(b-a<0.35){ const c=(a+b)/2; a=clamp(c-0.18,0,dur); b=clamp(a+0.36,0,dur); a=b-0.36>=0?b-0.36:0; }
     S.sel={a,b}; S.livePeaksCache=null; drawBooth();
+    markCapSelection(); updateCapNow(null);
   });
 })();
 
@@ -746,6 +765,17 @@ function drawLive(playT, selLen){
     const x=Math.round(clamp(playT/selLen,0,1)*w)+0.5;
     ctx.strokeStyle=CLR.white; ctx.lineWidth=1.5;
     ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke();
+  }
+  if(S.clip.captions){
+    const cc=cueAt(S.sel.a+(playT===null?0.001:Math.max(0,playT)));
+    ctx.textAlign='center'; ctx.font='600 15px Outfit,sans-serif';
+    const line=cc.cur?cc.cur.text:(cc.next&&cc.next.a<S.sel.b?'… '+cc.next.text:'');
+    if(line){
+      const txt=fitText(ctx,line,w-40), tw=ctx.measureText(txt).width;
+      ctx.fillStyle='rgba(19,17,32,.62)'; ctx.fillRect(w/2-tw/2-9,4,tw+18,21);
+      ctx.fillStyle=cc.cur?CLR.white:CLR.faint; ctx.fillText(txt,w/2,19);
+    }
+    ctx.textAlign='left';
   }
   if(liveData.countdown){
     ctx.fillStyle='rgba(19,17,32,.55)'; ctx.fillRect(0,0,w,h);
@@ -826,6 +856,9 @@ async function loadClipFromBuffer(buffer, name, tok){
   const dur=buffer.duration;
   S.sel={a:0,b:Math.min(dur,10)};
   S.clip.pitchRangeSel=null;
+  S.clip.capTracks=[]; S.clip.captions=null;
+  $('capSel').hidden=true; $('capText').value='';
+  renderCapBar();
   setStatus(st, mono16k.length>capped ? 'Ready — analysed the first 3 minutes.' : 'Clip ready.', 'ok');
   const info=$('clipInfo');
   info.style.display='block';
@@ -957,7 +990,8 @@ async function pipedMeta(base,id){
   const fs=[];
   for(const a of d.audioStreams||[]) if(a.url) fs.push({url:ytAbs(base,a.url),mime:a.mimeType||'',br:+a.bitrate||0,kind:'audio'});
   for(const v of d.videoStreams||[]) if(v.url&&!v.videoOnly&&/mp4/i.test(v.mimeType||'')) fs.push({url:ytAbs(base,v.url),mime:v.mimeType,br:+v.bitrate||0,kind:'muxed'});
-  return {title:d.title||('YouTube '+id), dur:+d.duration||0, formats:fs};
+  const caps=(d.subtitles||[]).filter(s=>s.url).map(s=>({label:(s.name||s.code||'?')+(s.autoGenerated?' (auto)':''), url:ytAbs(base,s.url), auto:!!s.autoGenerated}));
+  return {title:d.title||('YouTube '+id), dur:+d.duration||0, formats:fs, caps};
 }
 async function invMeta(base,id){
   const r=await fetchT(base+'/api/v1/videos/'+id+'?local=true',8000,{headers:{accept:'application/json'}});
@@ -968,7 +1002,8 @@ async function invMeta(base,id){
   const fs=[];
   for(const a of d.adaptiveFormats||[]) if(a.url&&/^audio\//.test(a.type||'')) fs.push({url:ytAbs(base,a.url),mime:a.type,br:+a.bitrate||0,kind:'audio'});
   for(const v of d.formatStreams||[]) if(v.url&&/mp4/.test(v.type||'')) fs.push({url:ytAbs(base,v.url),mime:v.type,br:+v.bitrate||0,kind:'muxed'});
-  return {title:d.title||('YouTube '+id), dur:+d.lengthSeconds||0, formats:fs};
+  const caps=(d.captions||[]).filter(c=>c.url).map(c=>({label:c.label||c.language_code||'?', url:ytAbs(base,c.url), auto:/auto/i.test(c.label||'')}));
+  return {title:d.title||('YouTube '+id), dur:+d.lengthSeconds||0, formats:fs, caps};
 }
 function sortFormats(fs,canWebm){
   const rank=f=>{
@@ -1065,6 +1100,11 @@ async function loadYouTube(url){
           if(tok!==S.loadTok) return;
           await loadClipFromBuffer(audio, c.m.title, tok);
           if(tok===S.loadTok&&dl.truncated) setStatus($('boothStatus'),'That video was big — loaded the first '+fmtT(audio.duration)+' of it.');
+          if(tok===S.loadTok&&S.clip&&c.m.caps&&c.m.caps.length){
+            S.clip.capTracks=c.m.caps;
+            setupCapSel();
+            loadCapTrack(pickCapTrack(c.m.caps), tok);
+          }
           return;
         }catch(e){ /* dead stream or undecodable format: fall through to the next */ }
       }
@@ -1092,12 +1132,181 @@ function playSelection(){
   const len=S.sel.b-S.sel.a, t0=a.currentTime+0.05;
   src.start(t0,S.sel.a,len);
   S.preview={src,t0,a:S.sel.a,len};
-  src.onended=()=>{ if(S.preview&&S.preview.src===src){ S.preview=null; drawBooth(); } };
-  (function loop(){ if(!S.preview) return; drawBooth(); requestAnimationFrame(loop); })();
+  src.onended=()=>{ if(S.preview&&S.preview.src===src){ S.preview=null; drawBooth(); updateCapNow(null); } };
+  (function loop(){ if(!S.preview) return; drawBooth(); updateCapNow(S.preview.a+Math.max(0,a.currentTime-S.preview.t0)); requestAnimationFrame(loop); })();
 }
 $('btnPlaySel').addEventListener('click',playSelection);
-$('btnStopSel').addEventListener('click',()=>{ stopAllPlayback(); drawBooth(); });
-$('btnSelAll').addEventListener('click',()=>{ if(!S.clip) return; S.sel={a:0,b:S.clip.buffer.duration}; S.livePeaksCache=null; drawBooth(); });
+$('btnStopSel').addEventListener('click',()=>{ stopAllPlayback(); drawBooth(); updateCapNow(null); });
+$('btnSelAll').addEventListener('click',()=>{ if(!S.clip) return; S.sel={a:0,b:S.clip.buffer.duration}; S.livePeaksCache=null; drawBooth(); markCapSelection(); updateCapNow(null); });
+
+/* ============================== transcript ============================== */
+/* Cues come from YouTube caption tracks (VTT or TTML through the mirrors),
+   a dropped .srt/.vtt file, or a line typed by hand. Clicking a cue selects
+   its time range, and the current words are drawn on the live view. */
+const capTime=s=>{
+  if(!s) return null;
+  s=String(s).trim();
+  let m=s.match(/^(?:(\d+):)?(\d{1,2}):(\d{1,2}(?:[.,]\d+)?)$/);
+  if(m) return (+(m[1]||0))*3600+(+m[2])*60+parseFloat(m[3].replace(',','.'));
+  m=s.match(/^([\d.]+)(m?s)?$/);
+  if(m) return m[2]==='ms'?+m[1]/1000:+m[1];
+  return null;
+};
+function cleanCapText(s){
+  return s.replace(/<[^>]*>/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>')
+    .replace(/&#39;|&apos;/g,'’').replace(/&quot;/g,'"').replace(/\s+/g,' ').trim();
+}
+function dedupCues(cues){
+  cues.sort((x,y)=>x.a-y.a);
+  const out=[];
+  for(const c of cues){
+    const p=out[out.length-1];
+    if(p&&p.text===c.text&&c.a<=p.b+0.05) p.b=Math.max(p.b,c.b);
+    else out.push({a:c.a,b:c.b,text:c.text});
+  }
+  return out;
+}
+function parseVttSrt(text){
+  const cues=[], lines=text.replace(/\r/g,'').split('\n');
+  for(let i=0;i<lines.length;i++){
+    const L=lines[i], k=L.indexOf('-->');
+    if(k<0) continue;
+    const a=capTime(L.slice(0,k).trim());
+    const b=capTime(L.slice(k+3).trim().split(/\s+/)[0]);
+    const buf=[];
+    for(i++; i<lines.length&&lines[i].trim()!==''; i++) buf.push(lines[i]);
+    if(a!==null&&b!==null&&b>a){
+      const t=cleanCapText(buf.join(' '));
+      if(t) cues.push({a,b,text:t});
+    }
+  }
+  return dedupCues(cues);
+}
+function parseTtml(xml){
+  const doc=new DOMParser().parseFromString(xml,'text/xml');
+  const ps=doc.getElementsByTagNameNS('*','p'), cues=[];
+  for(const p of ps){
+    const a=capTime(p.getAttribute('begin')), b=capTime(p.getAttribute('end'));
+    const t=cleanCapText(p.textContent||'');
+    if(a!==null&&b!==null&&b>a&&t) cues.push({a,b,text:t});
+  }
+  return dedupCues(cues);
+}
+function parseCaptions(text){ return /^\s*</.test(text)?parseTtml(text):parseVttSrt(text); }
+function fitText(ctx,s,maxW){
+  if(ctx.measureText(s).width<=maxW) return s;
+  let lo=0,hi=s.length;
+  while(lo<hi){ const mid=(lo+hi+1)>>1; if(ctx.measureText(s.slice(0,mid)+'…').width<=maxW) lo=mid; else hi=mid-1; }
+  return s.slice(0,lo)+'…';
+}
+function cueAt(t){
+  const cues=S.clip&&S.clip.captions;
+  if(!cues) return {cur:null,next:null};
+  let cur=null,next=null;
+  for(const c of cues){
+    if(t>=c.a&&t<c.b) cur=c;
+    else if(c.a>=t){ next=c; break; }
+  }
+  return {cur,next};
+}
+function updateCapNow(t){
+  const el=$('capNow'), cues=S.clip&&S.clip.captions;
+  if(!cues){ el.hidden=true; return; }
+  el.hidden=false; el.innerHTML='';
+  const cc=cueAt(t===null?S.sel.a+0.001:t);
+  const cur=cc.cur||(t===null&&cc.next&&cc.next.a<S.sel.b?cc.next:null);
+  if(cur) el.append(document.createTextNode('“'+cur.text+'”'));
+  if(t!==null&&cc.next&&cc.next!==cur&&cc.next.a<S.sel.b){
+    const s=document.createElement('span'); s.className='dim';
+    s.textContent=(cur?' · next: ':'next: ')+cc.next.text;
+    el.append(s);
+  }
+  if(!el.childNodes.length) el.innerHTML='&nbsp;';
+}
+function markCapSelection(){
+  const cues=S.clip&&S.clip.captions;
+  if(!cues) return;
+  [...$('capBar').children].forEach((el,i)=>{
+    const c=cues[i];
+    el.classList.toggle('on', c&&c.a<S.sel.b&&c.b>S.sel.a);
+  });
+}
+function setCaptions(cues){
+  if(!S.clip) return;
+  S.clip.captions=cues&&cues.length?cues:null;
+  renderCapBar();
+}
+function renderCapBar(){
+  const bar=$('capBar');
+  bar.innerHTML='';
+  const cues=S.clip&&S.clip.captions;
+  if(!cues){ bar.hidden=true; updateCapNow(null); return; }
+  bar.hidden=false;
+  cues.forEach((c,i)=>{
+    const b=document.createElement('button');
+    b.className='cap'; b.type='button';
+    b.textContent=c.text;
+    b.title=fmtT(c.a)+' – '+fmtT(c.b)+'  '+c.text;
+    b.addEventListener('click',()=>{
+      if(S.recording) return;
+      const dur=S.clip.buffer.duration, prev=cues[i-1], nx=cues[i+1];
+      let a2=c.a-0.12, b2=c.b+0.25;
+      if(prev&&prev.b<c.a) a2=Math.max(a2,prev.b+0.02);
+      if(nx&&nx.a>c.b) b2=Math.min(b2,nx.a-0.02);
+      a2=clamp(a2,0,dur); b2=clamp(b2,0,dur);
+      if(b2-a2<0.36) b2=clamp(a2+0.36,0,dur);
+      S.sel={a:a2,b:b2};
+      S.livePeaksCache=null; drawBooth(); markCapSelection(); updateCapNow(null);
+      setStatus($('boothStatus'),'Line selected — play it, then hit ● Record (or Rehearse) in step 3.');
+    });
+    bar.appendChild(b);
+  });
+  markCapSelection();
+  updateCapNow(null);
+}
+function pickCapTrack(tracks){
+  const i=tracks.findIndex(t=>!t.auto);
+  return i<0?0:i;
+}
+function setupCapSel(){
+  const sel=$('capSel'), tracks=(S.clip&&S.clip.capTracks)||[];
+  sel.innerHTML='';
+  if(!tracks.length){ sel.hidden=true; return; }
+  tracks.forEach((t,i)=>{ const o=document.createElement('option'); o.value=i; o.textContent='CC: '+t.label; sel.appendChild(o); });
+  sel.hidden=tracks.length<2;
+  sel.value=String(pickCapTrack(tracks));
+}
+async function loadCapTrack(i,tok){
+  const tr=S.clip&&S.clip.capTracks&&S.clip.capTracks[i];
+  if(!tr) return;
+  try{
+    setStatus($('boothStatus'),'Fetching captions ('+tr.label+')…');
+    const r=await fetchT(tr.url,10000);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const text=await r.text();
+    if(tok!==S.loadTok||!S.clip) return;
+    const cues=parseCaptions(text);
+    setCaptions(cues);
+    setStatus($('boothStatus'), cues.length?'Captions loaded — click a line below to pick it as your selection.':'No usable text in that caption track.');
+  }catch(_){ if(tok===S.loadTok) setStatus($('boothStatus'),'Couldn’t fetch captions for this video.'); }
+}
+$('capSel').addEventListener('change',e=>loadCapTrack(+e.target.value,S.loadTok));
+$('btnCapSet').addEventListener('click',()=>{
+  if(!S.clip) return;
+  const t=$('capText').value.trim();
+  if(!t){ setStatus($('boothStatus'),'Type the words first, then press Set words.'); return; }
+  setCaptions([{a:S.sel.a,b:S.sel.b,text:t}]);
+  setStatus($('boothStatus'),'Words set — they’ll show on screen while you record this line.');
+});
+$('capText').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); $('btnCapSet').click(); } });
+$('btnCapFile').addEventListener('click',()=>$('capFile').click());
+$('capFile').addEventListener('change',async e=>{
+  const f=e.target.files[0]; e.target.value='';
+  if(!f||!S.clip) return;
+  const cues=parseCaptions(await f.text());
+  setCaptions(cues);
+  setStatus($('boothStatus'), cues.length?cues.length+' lines loaded from '+f.name+'.':'Couldn’t read any cues from '+f.name+' — is it a .srt or .vtt?', cues.length?'':'err');
+});
 
 /* ============================== recording ============================== */
 async function getMic(){
@@ -1111,7 +1320,12 @@ async function getMic(){
     if(live && S.micStream._hp===hp && S.micStream._id===S.micId) return S.micStream;
     S.micStream.getTracks().forEach(t=>t.stop());
   }
-  const stream=await navigator.mediaDevices.getUserMedia(constraints);
+  let stream;
+  try{ stream=await navigator.mediaDevices.getUserMedia(constraints); }
+  catch(e){
+    if(e&&e.name==='OverconstrainedError'&&S.micId){ S.micId=''; delete constraints.audio.deviceId; stream=await navigator.mediaDevices.getUserMedia(constraints); }
+    else throw e;
+  }
   stream._hp=hp; stream._id=S.micId;
   S.micStream=stream;
   try{
@@ -1129,29 +1343,48 @@ async function getMic(){
 $('micSel').addEventListener('change',e=>{ S.micId=e.target.value; if(S.micStream){ S.micStream.getTracks().forEach(t=>t.stop()); S.micStream=null; } });
 
 let rec=null;
-async function startRecording(){
+function micErrorMsg(err){
+  const name=err&&err.name;
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)
+    return 'This page needs a secure address (https, or opened as a local file) before the browser offers a microphone.';
+  if(name==='NotAllowedError'||name==='SecurityError'){
+    if(window.claude&&window.claude.use) return 'This claude.ai preview runs in a sandbox that blocks the microphone even after you allow it — that’s the sandbox, not your settings. Use Rehearse here; recording works on the real page (your site, or this file opened from the repo).';
+    return 'Mic blocked by the browser — click the icon by the address bar, set Microphone to Allow for this page, then try again.';
+  }
+  if(name==='NotFoundError') return 'No microphone found — plug one in or pick another input, then try again.';
+  if(name==='NotReadableError') return 'Another app is holding the microphone (a call, Discord, OBS…) — close it and try again.';
+  return 'Couldn’t open the microphone ('+(name||err)+') — check the page’s mic permission and try again.';
+}
+async function startRecording(rehearse){
   if(!S.clip||S.recording) return;
   const st=$('recStatus');
-  let stream;
-  try{ ensureCtx(); stream=await getMic(); }
-  catch(err){
-    setStatus(st,(location.protocol==='file:'||location.protocol==='https:')
-      ?'Mic blocked — allow microphone access for this page (address-bar icon), then try again.'
-      :'Mic needs a secure page — open this file over https or from disk.','err');
-    return;
+  let stream=null;
+  if(rehearse){ ensureCtx(); }
+  else{
+    try{ ensureCtx(); stream=await getMic(); }
+    catch(err){ setStatus(st,micErrorMsg(err),'err'); return; }
   }
   stopAllPlayback();
-  S.recording=true; S.take=null;
-  $('panel-match').hidden=true;
-  const btn=$('btnRec'); btn.textContent='■ Stop'; btn.classList.add('live');
+  S.recording=true;
+  if(rehearse){
+    $('btnReh').textContent='■ Stop'; $('btnRec').disabled=true;
+  } else {
+    S.take=null;
+    $('panel-match').hidden=true;
+    const btn=$('btnRec'); btn.textContent='■ Stop'; btn.classList.add('live');
+    $('btnReh').disabled=true;
+  }
   ['btnPlaySel','btnPlayBoth','btnPlayRef','btnPlayTake','btnDemo'].forEach(id=>{ const b=$(id); if(b) b.disabled=true; });
 
   const a=S.actx, selLen=S.sel.b-S.sel.a, sr=a.sampleRate;
-  const src=a.createMediaStreamSource(stream);
-  const analyser=a.createAnalyser(); analyser.fftSize=4096;
-  const sp=a.createScriptProcessor(4096,1,1);
-  const sink=a.createGain(); sink.gain.value=0;
-  src.connect(analyser); src.connect(sp); sp.connect(sink); sink.connect(a.destination);
+  let src=null,analyser=null,sp=null,sink=null;
+  if(!rehearse){
+    src=a.createMediaStreamSource(stream);
+    analyser=a.createAnalyser(); analyser.fftSize=4096;
+    sp=a.createScriptProcessor(4096,1,1);
+    sink=a.createGain(); sink.gain.value=0;
+    src.connect(analyser); src.connect(sp); sp.connect(sink); sink.connect(a.destination);
+  }
 
   const fa=Math.floor(S.sel.a/S.clip.analysis.hop), fb=Math.min(S.clip.analysis.nF,Math.floor(S.sel.b/S.clip.analysis.hop));
   const selFreqs=[];
@@ -1160,11 +1393,11 @@ async function startRecording(){
   let selEnvMax=1e-5;
   for(let f=fa;f<fb;f++) if(S.clip.analysis.env[f]>selEnvMax) selEnvMax=S.clip.analysis.env[f];
 
-  rec={stream,src,analyser,sp,sink,chunks:[],captured:0,capturing:false,sr,
+  rec={stream,src,analyser,sp,sink,rehearse:!!rehearse,chunks:[],captured:0,capturing:false,sr,
        target:Math.ceil((selLen+0.4)*sr), t0:0, monitorSrc:null, lastRms:0, youMax:0.02, raf:0, alive:true};
   liveData.youEnv=[]; liveData.youPitch=[]; liveData.countdown='3';
 
-  sp.onaudioprocess=e=>{
+  if(sp) sp.onaudioprocess=e=>{
     if(!rec||!rec.capturing) return;
     const d=e.inputBuffer.getChannelData(0);
     rec.chunks.push(new Float32Array(d));
@@ -1184,16 +1417,16 @@ async function startRecording(){
   beepAt(now,880); beepAt(now+0.55,880); beepAt(now+1.10,1175);
   const t0=now+1.65;
   rec.t0=t0;
-  if($('chkMonitor').checked){
+  if(rehearse||$('chkMonitor').checked){
     const m=a.createBufferSource(); m.buffer=S.clip.buffer;
     const g=a.createGain(); g.gain.value=($('monVol').value/100)*0.9;
     m.connect(g); g.connect(a.destination);
     m.start(t0,S.sel.a,selLen);
     rec.monitorSrc=m;
   }
-  setStatus(st,'Count-in… speak when the sweep starts.');
+  setStatus(st, rehearse?'Count-in… rehearsal — nothing is recorded.':'Count-in… speak when the sweep starts.');
 
-  const winBuf=new Float32Array(analyser.fftSize);
+  const winBuf=analyser?new Float32Array(analyser.fftSize):null;
   let frame=0;
   (function loop(){
     if(!rec||!rec.alive) return;
@@ -1204,10 +1437,14 @@ async function startRecording(){
       drawLive(null,selLen);
       return;
     }
-    if(!rec.capturing){ rec.capturing=true; liveData.countdown=null; setStatus(st,'Recording — ride the amber wave.'); }
+    if(!rec.capturing){ rec.capturing=true; liveData.countdown=null; setStatus(st, rec.rehearse?'Rehearsing — speak along, nothing is recorded.':'Recording — ride the amber wave.'); }
+    if(rec.rehearse&&tNow-t0>=selLen+0.05){ finishTake(false); return; }
     const playT=Math.min(tNow-t0, selLen);
     frame++;
-    if(frame%2===0){
+    if(frame%2===0&&rec.rehearse){
+      const fIdx=clamp(fa+Math.floor(playT/S.clip.analysis.hop),fa,fb-1);
+      $('mRef').style.height=Math.round(clamp(S.clip.analysis.env[fIdx]/selEnvMax,0,1)*100)+'%';
+    } else if(frame%2===0){
       analyser.getFloatTimeDomainData(winBuf);
       const lp=livePitch(winBuf,sr);
       if(lp.freq>0){
@@ -1241,9 +1478,10 @@ function teardownRec(){
   try{rec.src.disconnect();}catch(_){}
   try{rec.analyser.disconnect();}catch(_){}
   try{rec.sink.disconnect();}catch(_){}
-  rec.sp.onaudioprocess=null;
+  if(rec.sp) rec.sp.onaudioprocess=null;
   if(rec.monitorSrc){ try{rec.monitorSrc.stop();}catch(_){} }
-  const btn=$('btnRec'); btn.textContent='● Record take'; btn.classList.remove('live');
+  const btn=$('btnRec'); btn.textContent='● Record take'; btn.classList.remove('live'); btn.disabled=false;
+  const reh=$('btnReh'); reh.textContent='Rehearse (no mic)'; reh.disabled=false;
   ['btnPlaySel','btnPlayBoth','btnPlayRef','btnPlayTake','btnDemo'].forEach(id=>{ const b=$(id); if(b) b.disabled=false; });
   S.recording=false;
   $('mRef').style.height='0%'; $('mYou').style.height='0%';
@@ -1255,6 +1493,11 @@ async function finishTake(cancelled){
   const wasCapturing=r.capturing;
   teardownRecFrom(r);
   const st=$('recStatus');
+  if(r.rehearse){
+    liveData.countdown=null; drawLive(null, Math.max(0.001,S.sel.b-S.sel.a));
+    setStatus(st, cancelled?'Rehearsal stopped.':'Rehearsal done — hit ● Record take when you’re ready.');
+    return;
+  }
   if(cancelled||!wasCapturing||r.captured<r.sr*0.3){
     setStatus(st, cancelled?'Take cancelled.':'That take was too short — try again.');
     liveData.countdown=null; drawLive(null, S.sel.b-S.sel.a);
@@ -1275,6 +1518,7 @@ async function finishTake(cancelled){
 function teardownRecFrom(r){ const keep=rec; rec=r; teardownRec(); rec=keep; }
 
 $('btnRec').addEventListener('click',()=>{ if(S.recording){ finishTake(false); } else startRecording(); });
+$('btnReh').addEventListener('click',()=>{ if(S.recording){ if(rec&&rec.rehearse) finishTake(false); } else startRecording(true); });
 
 /* ============================== match / scoring ============================== */
 function autoAlign(){
