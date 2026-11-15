@@ -172,8 +172,14 @@ window.onLoc=function(lat,lon,speedMs,bearing,hasBearing,acc,time,provider,alt){
   if(brg!=null&&loc.prevBrg!=null){const dt=Math.max(0.3,(now-loc.prevBrgT)/1000);let d=brg-loc.prevBrg;while(d>180)d-=360;while(d<-180)d+=360;yawGps=yawGps*0.4+(d/dt)*0.6;}else if(brg==null)yawGps=0;
   if(brg!=null){loc.prevBrg=brg;loc.prevBrgT=now;}
   loc.bearing=brg;loc.time=now;};
-window.addEventListener('devicemotion',e=>{tilt.at=Date.now();const a=e.acceleration;if(a&&a.x!=null){const m=Math.sqrt(a.x*a.x+a.y*a.y+a.z*a.z)/9.81;gMag=gMag*0.85+m*0.15;if(m>gPeak)gPeak=m;tilt.lin=[tilt.lin[0]*0.8+a.x*0.2,tilt.lin[1]*0.8+a.y*0.2,tilt.lin[2]*0.8+a.z*0.2];}
-  const gi=e.accelerationIncludingGravity;if(gi&&gi.x!=null){tilt.g=[tilt.g[0]*0.9+gi.x*0.1,tilt.g[1]*0.9+gi.y*0.1,tilt.g[2]*0.9+gi.z*0.1];}
+window.addEventListener('devicemotion',e=>{tilt.at=Date.now();const a=e.acceleration,K=tilt.k;const hasA=a&&a.x!=null;
+  if(hasA){const m=Math.sqrt(a.x*a.x+a.y*a.y+a.z*a.z)/9.81;gMag=gMag*0.85+m*0.15;if(m>gPeak)gPeak=m;tilt.lin=[tilt.lin[0]*0.8+K*a.x*0.2,tilt.lin[1]*0.8+K*a.y*0.2,tilt.lin[2]*0.8+K*a.z*0.2];}
+  const gi=e.accelerationIncludingGravity;if(gi&&gi.x!=null){
+    /* pure gravity = with-gravity minus the phone's own acceleration (the OS gyro fusion already split them), so braking, bumps and corners don't fake a tilt */
+    const gx=hasA?gi.x-a.x:gi.x,gy=hasA?gi.y-a.y:gi.y,gz=hasA?gi.z-a.z:gi.z,al=hasA?0.5:0.15;
+    tilt.graw=[tilt.graw[0]+(gx-tilt.graw[0])*al,tilt.graw[1]+(gy-tilt.graw[1])*al,tilt.graw[2]+(gz-tilt.graw[2])*al];
+    tilt.g=[-K*tilt.graw[0],-K*tilt.graw[1],-K*tilt.graw[2]];   /* "down" in phone axes */
+    computeTilt();if(Math.abs(tilt.roll)>session.maxRoll)session.maxRoll=Math.abs(tilt.roll);if(Math.abs(tilt.pitch)>session.maxPitch)session.maxPitch=Math.abs(tilt.pitch);}
   const r=e.rotationRate;if(r&&r.alpha!=null){const m=Math.sqrt(r.alpha*r.alpha+r.beta*r.beta+r.gamma*r.gamma);gyroDps=gyroDps*0.7+m*0.3;}});
 const webFix={lat:null,lon:null,t:0,v:0};
 function webLoc(p){const c=p.coords,t=p.timestamp||Date.now();let v=c.speed;
@@ -183,7 +189,7 @@ function webLoc(p){const c=p.coords,t=p.timestamp||Date.now();let v=c.speed;
 let geoWatch=null;function geoStart(){if(!navigator.geolocation)return;try{if(geoWatch!=null)navigator.geolocation.clearWatch(geoWatch);geoWatch=navigator.geolocation.watchPosition(p=>{loc.geoErr=0;webLoc(p);},e=>{loc.geoErr=e&&e.code||2;},{enableHighAccuracy:true,maximumAge:0,timeout:15000});}catch(e){}}
 geoStart();
 const bootT=Date.now();
-const APPV='8.8';const WEBAPP=!window.Native&&/^https?:$/.test(location.protocol);
+const APPV='8.9';const WEBAPP=!window.Native&&/^https?:$/.test(location.protocol);
 if(WEBAPP){
   if('serviceWorker' in navigator)try{navigator.serviceWorker.register('sw.js');}catch(e){}
   let wl=null;const wake=async()=>{try{if(navigator.wakeLock&&document.visibilityState==='visible'&&!wl){wl=await navigator.wakeLock.request('screen');wl.addEventListener('release',()=>{wl=null;});}}catch(e){}};
@@ -216,11 +222,26 @@ const history=[],latHist=[],trail=[];let near=[];let state=null;
 let flashes=LS.get('flashes',[]);let log=LS.get('log',[]);const life=Object.assign({km:0,passes:0,flashes:0,drives:0},LS.get('life',{}));life.drives++;function saveLife(){LS.set('life',life);}saveLife();
 let ltrail=LS.get('ltrail',[]);let ltrailAt=0;let altSm=null;
 /* tilt engine: gravity vector + learned forward axis -> roll/pitch */
-const tilt={gRef:(g=>g&&g[0]===0&&g[1]===0&&g[2]===9.8?null:g)(LS.get('gRef',null)),F:LS.get('fwd',null),g:[0,0,9.8],lin:[0,0,0],fwdAcc:[0,0,0],roll:0,pitch:0};
+/* k: +1 when the phone reports gravity as the spec says (up = +), -1 when it reports it flipped (iPhone). Checked again at every LEVEL. */
+const IOS=/iPhone|iPad|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+const tilt={k:LS.get('gK',IOS?-1:1),gRef:LS.get('gRef2',null),F:LS.get('fwd2',null),graw:[0,0,0],g:[0,0,1],lin:[0,0,0],fwdAcc:[0,0,0],roll:0,pitch:0};
 const vdot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];const vcross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];const vnorm=v=>{const m=Math.hypot(v[0],v[1],v[2])||1;return [v[0]/m,v[1]/m,v[2]/m];};
-function levelHere(){if(!tilt.at||Date.now()-tilt.at>3000){say(motionAsk()?'Motion sensors are off — tap ALLOW MOTION first':'No motion sensor data');return;}tilt.gRef=tilt.g.slice();LS.set('gRef',tilt.gRef);flash('LEVEL SET');}
-function learnFwd(dv){if(Math.abs(dv)<0.6)return;const a=tilt.lin;const m=Math.hypot(a[0],a[1],a[2]);if(m<0.5)return;const sg=Math.sign(dv);for(let i=0;i<3;i++)tilt.fwdAcc[i]=tilt.fwdAcc[i]*0.9+sg*a[i]/m*0.1;if(Math.hypot(tilt.fwdAcc[0],tilt.fwdAcc[1],tilt.fwdAcc[2])>0.35){tilt.F=vnorm(tilt.fwdAcc);LS.set('fwd',tilt.F);}}
-function computeTilt(){const U=vnorm(tilt.gRef||[0,0,1]);const u=vnorm(tilt.g);const F=tilt.F||[0,1,0];const fd=vdot(F,U);let Fp=vnorm([F[0]-U[0]*fd,F[1]-U[1]*fd,F[2]-U[2]*fd]);if(!isFinite(Fp[0]))Fp=[0,1,0];const R=vnorm(vcross(Fp,U));const cl=v=>Math.max(-1,Math.min(1,v));tilt.pitch=-Math.asin(cl(vdot(u,Fp)))*180/Math.PI;tilt.roll=Math.asin(cl(vdot(u,R)))*180/Math.PI;if(!tilt.gRef){tilt.pitch=0;tilt.roll=0;}}
+function levelHere(){if(!tilt.at||Date.now()-tilt.at>3000){say(motionAsk()?'Motion sensors are off — tap ALLOW MOTION first':'No motion sensor data');return;}
+  /* which way is up on the screen right now -> which sign this phone uses */
+  const ang=((screen.orientation&&screen.orientation.angle)!=null?screen.orientation.angle:(window.orientation||0));const r=vnorm(tilt.graw);
+  const up=Math.abs(r[2])>0.8?[0,0,1]:({0:[0,1,0],90:[1,0,0],180:[0,-1,0],270:[-1,0,0],'-90':[-1,0,0]})[String(((ang%360)+360)%360===270?270:ang)]||[0,1,0];
+  const d=vdot(r,up);if(Math.abs(d)>0.6){const k=d>0?1:-1;if(k!==tilt.k){tilt.k=k;tilt.F=null;LS.set('fwd2',null);tilt.fwdAcc=[0,0,0];}LS.set('gK',k);}
+  tilt.g=[-tilt.k*tilt.graw[0],-tilt.k*tilt.graw[1],-tilt.k*tilt.graw[2]];tilt.gRef=tilt.g.slice();LS.set('gRef2',tilt.gRef);flash('LEVEL SET');}
+function learnFwd(dv){if(Math.abs(dv)<0.6)return;const a=tilt.lin;const m=Math.hypot(a[0],a[1],a[2]);if(m<0.5)return;const sg=Math.sign(dv);for(let i=0;i<3;i++)tilt.fwdAcc[i]=tilt.fwdAcc[i]*0.9+sg*a[i]/m*0.1;if(Math.hypot(tilt.fwdAcc[0],tilt.fwdAcc[1],tilt.fwdAcc[2])>0.35){tilt.F=vnorm(tilt.fwdAcc);LS.set('fwd2',tilt.F);}}
+/* roll / pitch of the car. All vectors in phone axes; D = down when LEVEL was set, d = down now.
+   forward = the learned axis, else straight out of the back of the phone (phone in a mount facing you), else the top of the phone (phone lying flat) */
+function computeTilt(){if(!tilt.gRef){tilt.pitch=0;tilt.roll=0;return;}const D=vnorm(tilt.gRef),d=vnorm(tilt.g);
+  let F=tilt.F;if(!F){F=[0,0,-1];if(Math.abs(vdot(F,D))>0.8)F=[0,1,0];}
+  const fd=vdot(F,D);let Fp=vnorm([F[0]-D[0]*fd,F[1]-D[1]*fd,F[2]-D[2]*fd]);if(!isFinite(Fp[0])||Math.hypot(F[0]-D[0]*fd,F[1]-D[1]*fd,F[2]-D[2]*fd)<0.2)Fp=vnorm([0-D[0]*D[1],1-D[1]*D[1],0-D[2]*D[1]]);
+  const R=vnorm(vcross(D,Fp));   /* right side of the car */
+  const cl=v=>Math.max(-1,Math.min(1,v));
+  tilt.pitch=-Math.asin(cl(vdot(d,Fp)))*180/Math.PI;   /* + nose up */
+  tilt.roll=Math.asin(cl(vdot(d,R)))*180/Math.PI;}     /* + right side down */
 /* sunrise / sunset (NOAA-style approximation) */
 function sunTimes(lat,lon,date){try{const J=date.getTime()/86400000+2440587.5;const n=Math.round(J-2451545.0+0.0008);const Js=n-lon/360;const M=((357.5291+0.98560028*Js)%360+360)%360;const Mr=rad(M);const Cc=1.9148*Math.sin(Mr)+0.02*Math.sin(2*Mr)+0.0003*Math.sin(3*Mr);const lam=((M+Cc+180+102.9372)%360+360)%360;const lr=rad(lam);const Jt=2451545.0+Js+0.0053*Math.sin(Mr)-0.0069*Math.sin(2*lr);const sd=Math.sin(lr)*Math.sin(rad(23.4397));const dec=Math.asin(sd);const cw=(Math.sin(rad(-0.833))-Math.sin(rad(lat))*sd)/(Math.cos(rad(lat))*Math.cos(dec));if(cw<-1||cw>1)return null;const w0=Math.acos(cw)*180/Math.PI;const toDate=j=>new Date((j-2440587.5)*86400000);return {rise:toDate(Jt-w0/360),set:toDate(Jt+w0/360)};}catch(e){return null;}}
 let sunCache=null,sunAt=0;
@@ -326,7 +347,7 @@ function lerpAngle(a,b,k){let d=b-a;while(d>180)d-=360;while(d<-180)d+=360;retur
 function animate(now){let dt=A.last?(now-A.last)/1000:0.066;if(!(dt>0)||dt>0.5)dt=0.066;A.last=now;if(!state)return;const k=1-Math.pow(0.001,dt);  /* ~0.5 s settle */
   if(!isFinite(A.spd))A.spd=0;if(!isFinite(A.hdg))A.hdg=0;if(!isFinite(A.yaw))A.yaw=0;if(!isFinite(A.latG))A.latG=0;if(A.dist!=null&&!isFinite(A.dist))A.dist=null;
   A.spd+=((obdFast()?obdV():state.speed)-A.spd)*(obdFast()?Math.min(1,k*2.5):k);if(state.hdg!=null)A.hdg=lerpAngle(A.hdg,state.hdg,k*0.8);A.yaw+=(state.yaw-A.yaw)*k;A.latG+=(state.latG-A.latG)*k;
-  const td=state.threat?state.threat.d:null;A.dist=td==null||A.dist==null?td:A.dist+(td-A.dist)*k;A.odo+=A.spd/3.6*dt;A.roll+=(state.roll-A.roll)*k;A.pitch+=(state.pitch-A.pitch)*k;A.maxRoll=session.maxRoll;A.maxPitch=session.maxPitch;}
+  const td=state.threat?state.threat.d:null;A.dist=td==null||A.dist==null?td:A.dist+(td-A.dist)*k;A.odo+=A.spd/3.6*dt;{const kt=1-Math.pow(1e-6,dt);A.roll+=(tilt.roll-A.roll)*kt;A.pitch+=(tilt.pitch-A.pitch)*kt;}A.maxRoll=session.maxRoll;A.maxPitch=session.maxPitch;}
 
 /* ============================================================ drawing helpers (400×360 design space, same as the mockups) */
 const C={green:'#3DF58C',amber:'#FFB224',red:'#FF3B3B',grey:'#8a8a8a',dim:'#1c1c1c',white:'#fff',sign:'#E0202C',black:'#000'};
@@ -394,7 +415,7 @@ const LOOKS=[
   /* lateral-g bar at the bottom right */
   o+=`<line x1="300" y1="290" x2="376" y2="290" stroke="${C.dim}" stroke-width="4"/><line x1="338" y1="286" x2="338" y2="294" stroke="${C.grey}"/><rect x="${338+Math.min(0,A.latG*60)}" y="288" width="${Math.abs(A.latG*60)}" height="4" fill="${c}"/>`;return o;}},
 {name:'TERMINAL',anim:true,draw(s,t){const f='Plex';const c=SC(s);const txt=s.status==='OVER'?C.red:'#d6d6d6';const d=dIn(s);let o='';
-  o+=T('> rdr  v8.8',30,28,14,C.grey,f)+T(s.clock,370,28,14,C.grey,f,{a:'end'})+T('spd',30,56,14,C.grey,f)+T(spd(),72,44,64,s.status==='OVER'?C.red:C.white,f,{w:'bold',lh:64})+T('km/h',72+String(spd()).length*39,76,14,C.grey,f);
+  o+=T('> rdr  v8.9',30,28,14,C.grey,f)+T(s.clock,370,28,14,C.grey,f,{a:'end'})+T('spd',30,56,14,C.grey,f)+T(spd(),72,44,64,s.status==='OVER'?C.red:C.white,f,{w:'bold',lh:64})+T('km/h',72+String(spd()).length*39,76,14,C.grey,f);
   o+=T('lim   '+limStr(s)+(s.avg!=null?'   avg '+s.avg:''),30,126,14,txt,f);const dl=deltaStr(s);const ok=s.delta!=null&&s.delta<=0;
   if(s.status==='OVER')o+=`<rect x="30" y="148" width="${('!! dlt '+dl+' OVER !!').length*8.4+8}" height="22" fill="${C.red}"/>`+T('!! dlt '+dl+' OVER !!',34,152,14,C.black,f);else o+=T('dlt   '+dl+(ok?' ok':''),30,150,14,ok?C.green:txt,f);
   const cl=!s.threat?'nxt   none within 10 km':s.status==='CLEAR'?'nxt   '+distStr(A.dist):'cam   '+distStr(d)+'  '+camLabel(s).toLowerCase()+(conf(s.threat.cam)>1?'  x'+conf(s.threat.cam):'');o+=T(cl,30,174,14,s.status==='CLEAR'?txt:c,f);
@@ -1011,7 +1032,38 @@ function tallPanels(s,t,PH,font){const c=SC(s),G='#8a8a8a',W='#fff';let U='',D='
 const OBD={state:'off',msg:'',speed:null,rpm:null,throttle:null,load:null,coolant:null,iat:null,pedal:null,fuel:null,volts:null,ambient:null,rate:0,at:0,log:[],speedCal:1,addr:null,name:'',proto:'',showLog:false,devs:[],want:false,sent:0,banner:false,liveMsg:'',linkFails:0,connAt:0};
 {const k=LS.get('obdCal',1);if(typeof k==='number'&&k>0.8&&k<1.25)OBD.speedCal=k;}
 let obdSid=0,obdBuf='',obdWait=null,obdRetry=null,obdCalN=0,obdPrevSp=null;const obdStamps=[];
-const obdNat=()=>window.Native||null;
+/* iPhone / browser: Bluetooth LE adapters through Web Bluetooth (Bluefy on iPhone, Chrome on Android/desktop).
+   Same calls as the Android bridge, so the whole OBD client runs unchanged. */
+const WebObd=(!window.Native&&navigator.bluetooth)?(()=>{
+  const SV=[0xfff0,0xffe0,0x18f0,0xfee0,0xae30,'e7810a71-73ae-499d-8c15-faa9aef0c3f2','49535343-fe7d-4ae5-8fa9-9fafd205e455','0000ffe5-0000-1000-8000-00805f9b34fb'];
+  const devs=new Map();let cur=null,wr=null,nt=null,gen=0,q=Promise.resolve();const dec=new TextDecoder('latin1'),enc=new TextEncoder();
+  const ev=o=>{try{window.obdEvt&&window.obdEvt(o);}catch(e){}};
+  const known=async()=>{try{if(navigator.bluetooth.getDevices)for(const d of await navigator.bluetooth.getDevices())devs.set(d.id,d);}catch(e){}};known();
+  const onRx=e=>{try{if(nt&&e.target!==nt)return;const v=e.target.value;window.obdData&&window.obdData(dec.decode(new Uint8Array(v.buffer,v.byteOffset,v.byteLength)));}catch(x){}};
+  function drop(g,s,m){if(g!==gen)return;gen++;const d=cur;cur=null;wr=null;try{nt&&nt.removeEventListener('characteristicvaluechanged',onRx);}catch(e){}nt=null;try{d&&d.gatt&&d.gatt.connected&&d.gatt.disconnect();}catch(e){}ev({t:'state',s,m});}
+  async function run(addr,g){ev({t:'state',s:'connecting',m:'Bluetooth LE'});await known();const d=devs.get(addr);
+    if(!d){drop(g,'fail','tap SCAN FOR ADAPTERS and pick the adapter (iPhone asks again after Radar is closed)');return;}
+    try{cur=d;d.ongattserverdisconnected=()=>drop(g,'down','adapter disconnected');
+      const sv=await Promise.race([d.gatt.connect(),new Promise((_,j)=>setTimeout(()=>j(new Error('no answer — is the engine on and the adapter plugged in?')),15000))]);if(g!==gen)return;
+      let w=null,n=null;
+      for(const svc of await sv.getPrimaryServices()){let cs=[];try{cs=await svc.getCharacteristics();}catch(e){continue;}
+        const nn=cs.find(c=>c.properties.notify||c.properties.indicate),ww=cs.find(c=>c.properties.write||c.properties.writeWithoutResponse);
+        if(nn&&ww){n=nn;w=ww;break;}if(!n&&nn)n=nn;if(!w&&ww)w=ww;}
+      if(!n||!w)throw new Error('this adapter has no serial service Radar knows');
+      await n.startNotifications();n.addEventListener('characteristicvaluechanged',onRx);if(g!==gen)return;nt=n;wr=w;ev({t:'state',s:'up',m:'ble'});}
+    catch(e){drop(g,'fail',String(e&&e.message||e));}}
+  return {
+    askPerms(){},perm(){return true;},btOn(){return true;},
+    paired(){return JSON.stringify([...devs.values()].map(d=>({name:d.name||'BLE adapter',addr:d.id,le:true})));},
+    scan(){navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:SV}).then(d=>{devs.set(d.id,d);ev({t:'scan',done:true});setTimeout(()=>window.OBD&&OBD.connect(d.id,d.name||'BLE adapter'),50);})
+      .catch(e=>ev({t:'scan',done:true,m:/cancel/i.test(String(e))?'':String(e&&e.message||e)}));},
+    connect(addr){gen++;const g=gen;try{cur&&cur.gatt&&cur.gatt.connected&&cur.gatt.disconnect();}catch(e){}run(addr,g);},
+    send(text){const w=wr,g=gen;if(!w)return false;const b=enc.encode(String(text));
+      q=q.then(async()=>{for(let i=0;i<b.length;i+=20){if(g!==gen)return;const part=b.slice(i,i+20);
+        try{if(w.properties.writeWithoutResponse&&w.writeValueWithoutResponse)await w.writeValueWithoutResponse(part);else if(w.writeValueWithResponse)await w.writeValueWithResponse(part);else await w.writeValue(part);}catch(e){drop(g,'down','write failed');return;}}});return true;},
+    disconnect(){drop(gen,'off','');}};})():null;
+window.WebObd=WebObd;
+const obdNat=()=>window.Native||WebObd||null;
 const obdSleep=ms=>new Promise(r=>setTimeout(r,ms));
 function obdLog(l){OBD.log.push(l);if(OBD.log.length>80)OBD.log.splice(0,OBD.log.length-80);}
 function obdSet(st,msg){OBD.state=st;if(msg!=null)OBD.msg=msg;}
@@ -1204,20 +1256,20 @@ OBD.live=obdLive;window.OBD=OBD;
 /* menu section */
 function obdLine(){let t=OBD.state.toUpperCase()+(OBD.msg?' · '+OBD.msg:'')+(OBD.state!=='live'&&OBD.volts!=null&&!/battery/.test(OBD.msg||'')?' · battery '+OBD.volts.toFixed(1)+' V':'');if(OBD.state==='live')t+=' · '+OBD.rate.toFixed(0)+' samples/s · speed ×'+OBD.speedCal.toFixed(3)+(obdLive()?' · '+Math.round(OBD.rpm||0)+' rpm':' · no fresh data');return t;}
 function obdMenu(){const n=obdNat();let h=`<h2>OBD · engine data from the ELM327 adapter</h2><p id="obdline" style="white-space:normal;overflow-wrap:anywhere;font-size:12px;line-height:17px;color:${OBD.state==='live'?'#3DF58C':OBD.state==='fail'?'#FF3B3B':'#fff'}">${esc(obdLine())}</p><p id="obdwhy" style="white-space:normal;overflow-wrap:anywhere;font-size:11px;line-height:16px;color:#FFB224;display:${OBD.last&&OBD.state!=='live'?'block':'none'}">${esc(OBD.last?'LAST CHECK '+OBD.last:'')}</p>`;
-  if(!n)return h+`<p>Bluetooth bridge not available here (only inside the Android app).</p>`;
+  if(!n)return h+(WEBAPP?`<p>iPhone Safari has no Bluetooth, so OBD can't connect here. Get the free <b>Bluefy</b> browser from the App Store, open this same page in it, then come back to this menu and tap SCAN FOR ADAPTERS. Needs a Bluetooth LE adapter (one that also works with iPhones) — classic Bluetooth adapters can't talk to iPhones at all.</p>`:`<p>Bluetooth bridge not available here (only inside the Android app).</p>`);
   let on=true,perm=true;try{on=n.btOn();}catch(x){}try{if(n.perm)perm=n.perm();}catch(x){}
   OBD.devs=[];try{OBD.devs=JSON.parse(n.paired())||[];}catch(x){}
   /* the adapter used before stays in the list even after it was "forgotten" in Android: tapping it makes Android ask to pair again */
   {const sv=LS.get('obd',null);if(sv&&sv.addr&&!sv.addr.startsWith('wifi')&&!OBD.devs.some(d=>d.addr===sv.addr))OBD.devs.push({name:sv.name||sv.addr,addr:sv.addr,unpaired:true});}
   {const ob=d=>/OBD|ELM|V-?LINK|VGATE|ICAR|KONNWEI|VEEPEAK|ANCEL|CARISTA|BAFX|SCAN|OBDII|BLE|SPP|CAR|QIRG|MBITO|THINK|LELINK|KIWI|AUTO/i.test(d.name||'');OBD.devs.sort((a,b)=>(ob(b)?1:0)-(ob(a)?1:0));}
   h+=`<div class="row">`;OBD.devs.forEach((d,i)=>{h+=`<button class="${OBD.want&&OBD.addr===d.addr?'wht':''}" onclick="obdPick(${i})">${esc(d.name||d.addr)}${d.unpaired?' · TAP TO PAIR':''}</button>`;});
-  if(!perm)h+=`<button class="amb" onclick="Native.askPerms()">ALLOW BLUETOOTH</button>`;
-  h+=`<button onclick="try{OBD.scanning=true;Native.scan(12000);renderMenu()}catch(e){}">${OBD.scanning?'SCANNING…':'SCAN FOR ADAPTERS'}</button><button class="${OBD.want&&OBD.addr==='wifi'?'wht':''}" onclick="OBD.connect('wifi','Wi-Fi adapter');renderMenu()">WI-FI ADAPTER</button><button class="red" onclick="OBD.disconnect();renderMenu()">DISCONNECT</button><button onclick="OBD.showLog=!OBD.showLog;renderMenu()">LOG ${OBD.showLog?'ON':'OFF'}</button></div>`;
-  if(!perm)h+=`<p>Android needs the "Nearby devices" permission before paired adapters can be listed.</p>`;else if(!on)h+=`<p>Bluetooth is off — turn it on, then open this menu again.</p>`;else if(!OBD.devs.length)h+=`<p>No adapters yet. Plug the adapter in, start the engine, tap SCAN FOR ADAPTERS and tap its name (Bluetooth or Bluetooth LE — both work; PIN 1234 or 0000 if Android asks). Wi-Fi adapter: join its Wi-Fi network in the phone settings first, then tap WI-FI ADAPTER.</p>`;else h+=`<p style="color:#8a8a8a">Tap your adapter. ${OBD.devs.some(d=>d.unpaired)?'TAP TO PAIR: Android asks for the PIN — 1234 (or 0000). ':''}Not listed? Engine on, then SCAN FOR ADAPTERS. Wi-Fi adapter: join its network first, then WI-FI ADAPTER. The car must be running (or ignition on) — most cars switch OBD data off with the ignition off.</p>`;
+  if(!perm)h+=`<button class="amb" onclick="obdNat().askPerms()">ALLOW BLUETOOTH</button>`;
+  h+=`<button onclick="try{OBD.scanning=true;obdNat().scan(12000);renderMenu()}catch(e){}">${OBD.scanning?'SCANNING…':'SCAN FOR ADAPTERS'}</button>${window.Native?`<button class="${OBD.want&&OBD.addr==='wifi'?'wht':''}" onclick="OBD.connect('wifi','Wi-Fi adapter');renderMenu()">WI-FI ADAPTER</button>`:''}<button class="red" onclick="OBD.disconnect();renderMenu()">DISCONNECT</button><button onclick="OBD.showLog=!OBD.showLog;renderMenu()">LOG ${OBD.showLog?'ON':'OFF'}</button></div>`;
+  if(!perm)h+=`<p>Android needs the "Nearby devices" permission before paired adapters can be listed.</p>`;else if(!on)h+=`<p>Bluetooth is off — turn it on, then open this menu again.</p>`;else if(!OBD.devs.length)h+=window.Native?`<p>No adapters yet. Plug the adapter in, start the engine, tap SCAN FOR ADAPTERS and tap its name (Bluetooth or Bluetooth LE — both work; PIN 1234 or 0000 if Android asks). Wi-Fi adapter: join its Wi-Fi network in the phone settings first, then tap WI-FI ADAPTER.</p>`:`<p>No adapter yet. Plug it in, start the engine, tap SCAN FOR ADAPTERS and pick it from the list. Needs a Bluetooth LE adapter (one that works with iPhones).</p>`;else h+=`<p style="color:#8a8a8a">Tap your adapter. ${OBD.devs.some(d=>d.unpaired)?'TAP TO PAIR: Android asks for the PIN — 1234 (or 0000). ':''}Not listed? Engine on, then SCAN FOR ADAPTERS. Wi-Fi adapter: join its network first, then WI-FI ADAPTER. The car must be running (or ignition on) — most cars switch OBD data off with the ignition off.</p>`;
   if(OBD.showLog)h+=`<pre id="obdlog" style="font:11px 'ShareTech',monospace;color:#8a8a8a;white-space:pre-wrap;word-break:break-all;margin:8px 0;border:1px solid #222;padding:8px">${esc(OBD.log.slice(-30).join('\n'))||'(nothing yet)'}</pre>`;
   return h;}
 function obdMenuLive(full){const m=document.getElementById('menu');if(!m||m.style.display!=='block')return;if(full){renderMenu();return;}const y=document.getElementById('obdwhy');if(y){const on=OBD.last&&OBD.state!=='live';y.style.display=on?'block':'none';if(on)y.textContent='LAST CHECK '+OBD.last;}const l=document.getElementById('obdline');if(l){l.textContent=obdLine();l.style.color=OBD.state==='live'?'#3DF58C':OBD.state==='fail'?'#FF3B3B':'#fff';}const g=document.getElementById('obdlog');if(g)g.textContent=OBD.log.slice(-30).join('\n')||'(nothing yet)';}
-window.obdPick=function(i){const d=OBD.devs[i];if(!d)return;OBD.connect(d.addr,d.name);renderMenu();};
+window.obdPick=function(i){const d=OBD.devs[i];if(!d)return;if(!window.Native&&WebObd&&d.unpaired){OBD.scanning=true;WebObd.scan();return;}OBD.connect(d.addr,d.name);renderMenu();};
 setInterval(()=>{const p=performance.now();while(obdStamps.length&&p-obdStamps[0]>2000)obdStamps.shift();OBD.rate=obdStamps.length/2;
   if(OBD.state==='connecting'&&OBD.want&&Date.now()-OBD.connAt>40000)obdGo();obdMenuLive(false);},1000);
 (function(){const sv=LS.get('obd',null);if(sv&&sv.addr){OBD.addr=sv.addr;OBD.name=sv.name||'';if(sv.auto!==false&&obdNat()){OBD.want=true;setTimeout(obdGo,1200);}}})();
@@ -1750,7 +1802,7 @@ function offlineRoads(lat,lon){if(!OFF.idx)return false;const c=OFF.cell,ix=Math
 
 /* ============================================================ go */
 applyDim();tick();setInterval(()=>{window.__tk=Date.now();tick();},1000);requestAnimationFrame(render);
-(function(){const b=document.getElementById('boot');const lines=['RDR  v8.8','','GPS ........ '+(loc.anyAt?'OK':'WAIT'),'CAMS ....... '+cams.length,'FLASH ZONES  '+flashes.length,'ROADS ...... '+(roads?'CACHED':'NONE'),'FACES ...... '+LOOKS.length,'ALERTS ..... '+(settings.sound?'SND ':'')+(settings.haptic?'HAP ':'')+(settings.voice?'VOX':''),'','READY'];let i=0;const iv=setInterval(()=>{b.textContent+=lines[i]+'\n';i++;if(i>=lines.length){clearInterval(iv);setTimeout(()=>b.style.display='none',450);}},150);b.addEventListener('pointerdown',()=>{clearInterval(iv);b.style.display='none';});})();
+(function(){const b=document.getElementById('boot');const lines=['RDR  v8.9','','GPS ........ '+(loc.anyAt?'OK':'WAIT'),'CAMS ....... '+cams.length,'FLASH ZONES  '+flashes.length,'ROADS ...... '+(roads?'CACHED':'NONE'),'FACES ...... '+LOOKS.length,'ALERTS ..... '+(settings.sound?'SND ':'')+(settings.haptic?'HAP ':'')+(settings.voice?'VOX':''),'','READY'];let i=0;const iv=setInterval(()=>{b.textContent+=lines[i]+'\n';i++;if(i>=lines.length){clearInterval(iv);setTimeout(()=>b.style.display='none',450);}},150);b.addEventListener('pointerdown',()=>{clearInterval(iv);b.style.display='none';});})();
 if(!window.NO_BUNDLE){loadScript('data/cams.js');loadScript('data/emirates.js');loadScript('data/roads/index.js');}
 setTimeout(()=>{if(cams.length===0||Date.now()-settings.osmPull>30*24*3600*1000)refreshCams(true);},8000);
 </script>
