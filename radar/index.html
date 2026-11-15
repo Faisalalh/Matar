@@ -180,9 +180,10 @@ function webLoc(p){const c=p.coords,t=p.timestamp||Date.now();let v=c.speed;
   if(v==null||!(v>=0)){v=webFix.v;if(webFix.lat!=null&&t>webFix.t){const d=Geo.dist(webFix.lat,webFix.lon,c.latitude,c.longitude),dt=(t-webFix.t)/1000;if(dt>=0.5&&dt<10&&d>(c.accuracy||10)*0.3)v=d/dt;else if(dt>=3)v=0;}}
   webFix.lat=c.latitude;webFix.lon=c.longitude;webFix.t=t;webFix.v=v;const hb=c.heading!=null&&c.heading>=0&&isFinite(c.heading);
   onLoc(c.latitude,c.longitude,v,hb?c.heading:0,hb,c.accuracy,t,'web',c.altitude);}
-if(navigator.geolocation){try{navigator.geolocation.watchPosition(webLoc,()=>{},{enableHighAccuracy:true,maximumAge:0,timeout:15000});}catch(e){}}
+let geoWatch=null;function geoStart(){if(!navigator.geolocation)return;try{if(geoWatch!=null)navigator.geolocation.clearWatch(geoWatch);geoWatch=navigator.geolocation.watchPosition(p=>{loc.geoErr=0;webLoc(p);},e=>{loc.geoErr=e&&e.code||2;},{enableHighAccuracy:true,maximumAge:0,timeout:15000});}catch(e){}}
+geoStart();
 const bootT=Date.now();
-const APPV='8.7';const WEBAPP=!window.Native&&/^https?:$/.test(location.protocol);
+const APPV='8.8';const WEBAPP=!window.Native&&/^https?:$/.test(location.protocol);
 if(WEBAPP){
   if('serviceWorker' in navigator)try{navigator.serviceWorker.register('sw.js');}catch(e){}
   let wl=null;const wake=async()=>{try{if(navigator.wakeLock&&document.visibilityState==='visible'&&!wl){wl=await navigator.wakeLock.request('screen');wl.addEventListener('release',()=>{wl=null;});}}catch(e){}};
@@ -190,10 +191,10 @@ if(WEBAPP){
   const go=document.createElement('div');go.id='webgo';
   go.style.cssText='position:fixed;inset:0;z-index:30;background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;font-family:ShareTech,monospace;color:#fff;letter-spacing:3px;text-align:center;padding:24px';
   const standalone=navigator.standalone||matchMedia('(display-mode: standalone)').matches||matchMedia('(display-mode: fullscreen)').matches;
-  go.innerHTML=`<div style="font-size:12px;color:#E8B86D">RDR · RADAR</div><div style="font-size:30px;font-weight:800;border:2px solid #3DF58C;color:#3DF58C;padding:14px 26px">TAP TO START</div><div style="font-size:11px;color:#8a8a8a;line-height:1.8;max-width:330px">turns on voice + sound alerts and keeps the screen awake while you drive.${standalone?'':'<br><br><span style="color:#fff">FOR FULL SCREEN: tap Share <b>⎙</b> › Add to Home Screen, then open Radar from the home screen.</span>'}<br><br>keep Radar open on screen while driving — iPhone stops web apps when the screen locks.</div>`;
+  go.innerHTML=`<div style="font-size:12px;color:#E8B86D">RDR · RADAR · v${APPV}</div><div style="font-size:30px;font-weight:800;border:2px solid #3DF58C;color:#3DF58C;padding:14px 26px">TAP TO START</div><div style="font-size:11px;color:#8a8a8a;line-height:1.8;max-width:330px">turns on voice + sound alerts and keeps the screen awake while you drive.${standalone?'':'<br><br><span style="color:#fff">FOR FULL SCREEN: tap Share <b>⎙</b> › Add to Home Screen, then open Radar from the home screen.</span>'}<br><br>keep Radar open on screen while driving — iPhone stops web apps when the screen locks.</div>`;
   document.body.appendChild(go);
   go.addEventListener('click',async()=>{
-    askMotion();
+    askMotion();geoStart();
     try{actx=actx||new (window.AudioContext||window.webkitAudioContext)();await actx.resume();const o=actx.createOscillator(),g=actx.createGain();g.gain.value=0.0001;o.connect(g);g.connect(actx.destination);o.start();o.stop(actx.currentTime+0.05);}catch(e){}
     try{const u=new SpeechSynthesisUtterance('Radar on');u.lang='en-GB';u.volume=settings.voice?1:0;speechSynthesis.speak(u);}catch(e){}
     wake();go.remove();webCacheAll();},{once:true});}
@@ -208,14 +209,14 @@ const tiltHint=()=>!tilt.at||Date.now()-tilt.at>3000?(motionAsk()?'MOTION OFF ·
 async function webCacheAll(){if(!window.caches||LS.get('webCached',0)===APPV)return;try{const list=await (await fetch('files.json',{cache:'no-store'})).json();const c=await caches.open('radar-'+APPV);
   for(let i=0;i<list.length;i+=40){await Promise.all(list.slice(i,i+40).map(async f=>{try{if(!(await c.match(f))){const r=await fetch(f);if(r.ok)await c.put(f,r);}}catch(e){}}));}LS.set('webCached',APPV);}catch(e){}}
 function gpsBadge(now){const b=document.getElementById('nogps');if(now-loc.time<5000&&loc.src!=='network'){b.style.display='none';return;}
-  const t=!loc.anyAt?(now-bootT<12000?'WAITING FOR GPS':'NO FIX — ALLOW LOCATION / GO OUTSIDE'):loc.src==='network'?'GPS SEARCHING · POSITION ONLY':'GPS LOST '+Math.round((now-loc.time)/1000)+' s';b.textContent=t;b.style.display='block';}
+  const t=!loc.anyAt?(loc.geoErr===1?'LOCATION BLOCKED · SETTINGS › PRIVACY › LOCATION SERVICES › SAFARI WEBSITES › WHILE USING':now-bootT<12000?'WAITING FOR GPS':'NO FIX — ALLOW LOCATION / GO OUTSIDE'):loc.src==='network'?'GPS SEARCHING · POSITION ONLY':'GPS LOST '+Math.round((now-loc.time)/1000)+' s';b.textContent=t;b.style.display='block';}
 
 /* ============================================================ state */
 const history=[],latHist=[],trail=[];let near=[];let state=null;
 let flashes=LS.get('flashes',[]);let log=LS.get('log',[]);const life=Object.assign({km:0,passes:0,flashes:0,drives:0},LS.get('life',{}));life.drives++;function saveLife(){LS.set('life',life);}saveLife();
 let ltrail=LS.get('ltrail',[]);let ltrailAt=0;let altSm=null;
 /* tilt engine: gravity vector + learned forward axis -> roll/pitch */
-const tilt={gRef:LS.get('gRef',null),F:LS.get('fwd',null),g:[0,0,9.8],lin:[0,0,0],fwdAcc:[0,0,0],roll:0,pitch:0};
+const tilt={gRef:(g=>g&&g[0]===0&&g[1]===0&&g[2]===9.8?null:g)(LS.get('gRef',null)),F:LS.get('fwd',null),g:[0,0,9.8],lin:[0,0,0],fwdAcc:[0,0,0],roll:0,pitch:0};
 const vdot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];const vcross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];const vnorm=v=>{const m=Math.hypot(v[0],v[1],v[2])||1;return [v[0]/m,v[1]/m,v[2]/m];};
 function levelHere(){if(!tilt.at||Date.now()-tilt.at>3000){say(motionAsk()?'Motion sensors are off — tap ALLOW MOTION first':'No motion sensor data');return;}tilt.gRef=tilt.g.slice();LS.set('gRef',tilt.gRef);flash('LEVEL SET');}
 function learnFwd(dv){if(Math.abs(dv)<0.6)return;const a=tilt.lin;const m=Math.hypot(a[0],a[1],a[2]);if(m<0.5)return;const sg=Math.sign(dv);for(let i=0;i<3;i++)tilt.fwdAcc[i]=tilt.fwdAcc[i]*0.9+sg*a[i]/m*0.1;if(Math.hypot(tilt.fwdAcc[0],tilt.fwdAcc[1],tilt.fwdAcc[2])>0.35){tilt.F=vnorm(tilt.fwdAcc);LS.set('fwd',tilt.F);}}
@@ -393,7 +394,7 @@ const LOOKS=[
   /* lateral-g bar at the bottom right */
   o+=`<line x1="300" y1="290" x2="376" y2="290" stroke="${C.dim}" stroke-width="4"/><line x1="338" y1="286" x2="338" y2="294" stroke="${C.grey}"/><rect x="${338+Math.min(0,A.latG*60)}" y="288" width="${Math.abs(A.latG*60)}" height="4" fill="${c}"/>`;return o;}},
 {name:'TERMINAL',anim:true,draw(s,t){const f='Plex';const c=SC(s);const txt=s.status==='OVER'?C.red:'#d6d6d6';const d=dIn(s);let o='';
-  o+=T('> rdr  v8.7',30,28,14,C.grey,f)+T(s.clock,370,28,14,C.grey,f,{a:'end'})+T('spd',30,56,14,C.grey,f)+T(spd(),72,44,64,s.status==='OVER'?C.red:C.white,f,{w:'bold',lh:64})+T('km/h',72+String(spd()).length*39,76,14,C.grey,f);
+  o+=T('> rdr  v8.8',30,28,14,C.grey,f)+T(s.clock,370,28,14,C.grey,f,{a:'end'})+T('spd',30,56,14,C.grey,f)+T(spd(),72,44,64,s.status==='OVER'?C.red:C.white,f,{w:'bold',lh:64})+T('km/h',72+String(spd()).length*39,76,14,C.grey,f);
   o+=T('lim   '+limStr(s)+(s.avg!=null?'   avg '+s.avg:''),30,126,14,txt,f);const dl=deltaStr(s);const ok=s.delta!=null&&s.delta<=0;
   if(s.status==='OVER')o+=`<rect x="30" y="148" width="${('!! dlt '+dl+' OVER !!').length*8.4+8}" height="22" fill="${C.red}"/>`+T('!! dlt '+dl+' OVER !!',34,152,14,C.black,f);else o+=T('dlt   '+dl+(ok?' ok':''),30,150,14,ok?C.green:txt,f);
   const cl=!s.threat?'nxt   none within 10 km':s.status==='CLEAR'?'nxt   '+distStr(A.dist):'cam   '+distStr(d)+'  '+camLabel(s).toLowerCase()+(conf(s.threat.cam)>1?'  x'+conf(s.threat.cam):'');o+=T(cl,30,174,14,s.status==='CLEAR'?txt:c,f);
@@ -1749,7 +1750,7 @@ function offlineRoads(lat,lon){if(!OFF.idx)return false;const c=OFF.cell,ix=Math
 
 /* ============================================================ go */
 applyDim();tick();setInterval(()=>{window.__tk=Date.now();tick();},1000);requestAnimationFrame(render);
-(function(){const b=document.getElementById('boot');const lines=['RDR  v8.7','','GPS ........ '+(loc.anyAt?'OK':'WAIT'),'CAMS ....... '+cams.length,'FLASH ZONES  '+flashes.length,'ROADS ...... '+(roads?'CACHED':'NONE'),'FACES ...... '+LOOKS.length,'ALERTS ..... '+(settings.sound?'SND ':'')+(settings.haptic?'HAP ':'')+(settings.voice?'VOX':''),'','READY'];let i=0;const iv=setInterval(()=>{b.textContent+=lines[i]+'\n';i++;if(i>=lines.length){clearInterval(iv);setTimeout(()=>b.style.display='none',450);}},150);b.addEventListener('pointerdown',()=>{clearInterval(iv);b.style.display='none';});})();
+(function(){const b=document.getElementById('boot');const lines=['RDR  v8.8','','GPS ........ '+(loc.anyAt?'OK':'WAIT'),'CAMS ....... '+cams.length,'FLASH ZONES  '+flashes.length,'ROADS ...... '+(roads?'CACHED':'NONE'),'FACES ...... '+LOOKS.length,'ALERTS ..... '+(settings.sound?'SND ':'')+(settings.haptic?'HAP ':'')+(settings.voice?'VOX':''),'','READY'];let i=0;const iv=setInterval(()=>{b.textContent+=lines[i]+'\n';i++;if(i>=lines.length){clearInterval(iv);setTimeout(()=>b.style.display='none',450);}},150);b.addEventListener('pointerdown',()=>{clearInterval(iv);b.style.display='none';});})();
 if(!window.NO_BUNDLE){loadScript('data/cams.js');loadScript('data/emirates.js');loadScript('data/roads/index.js');}
 setTimeout(()=>{if(cams.length===0||Date.now()-settings.osmPull>30*24*3600*1000)refreshCams(true);},8000);
 </script>
