@@ -172,7 +172,7 @@ window.onLoc=function(lat,lon,speedMs,bearing,hasBearing,acc,time,provider,alt){
   if(brg!=null&&loc.prevBrg!=null){const dt=Math.max(0.3,(now-loc.prevBrgT)/1000);let d=brg-loc.prevBrg;while(d>180)d-=360;while(d<-180)d+=360;yawGps=yawGps*0.4+(d/dt)*0.6;}else if(brg==null)yawGps=0;
   if(brg!=null){loc.prevBrg=brg;loc.prevBrgT=now;}
   loc.bearing=brg;loc.time=now;};
-window.addEventListener('devicemotion',e=>{const a=e.acceleration;if(a&&a.x!=null){const m=Math.sqrt(a.x*a.x+a.y*a.y+a.z*a.z)/9.81;gMag=gMag*0.85+m*0.15;if(m>gPeak)gPeak=m;tilt.lin=[tilt.lin[0]*0.8+a.x*0.2,tilt.lin[1]*0.8+a.y*0.2,tilt.lin[2]*0.8+a.z*0.2];}
+window.addEventListener('devicemotion',e=>{tilt.at=Date.now();const a=e.acceleration;if(a&&a.x!=null){const m=Math.sqrt(a.x*a.x+a.y*a.y+a.z*a.z)/9.81;gMag=gMag*0.85+m*0.15;if(m>gPeak)gPeak=m;tilt.lin=[tilt.lin[0]*0.8+a.x*0.2,tilt.lin[1]*0.8+a.y*0.2,tilt.lin[2]*0.8+a.z*0.2];}
   const gi=e.accelerationIncludingGravity;if(gi&&gi.x!=null){tilt.g=[tilt.g[0]*0.9+gi.x*0.1,tilt.g[1]*0.9+gi.y*0.1,tilt.g[2]*0.9+gi.z*0.1];}
   const r=e.rotationRate;if(r&&r.alpha!=null){const m=Math.sqrt(r.alpha*r.alpha+r.beta*r.beta+r.gamma*r.gamma);gyroDps=gyroDps*0.7+m*0.3;}});
 const webFix={lat:null,lon:null,t:0,v:0};
@@ -182,7 +182,7 @@ function webLoc(p){const c=p.coords,t=p.timestamp||Date.now();let v=c.speed;
   onLoc(c.latitude,c.longitude,v,hb?c.heading:0,hb,c.accuracy,t,'web',c.altitude);}
 if(navigator.geolocation){try{navigator.geolocation.watchPosition(webLoc,()=>{},{enableHighAccuracy:true,maximumAge:0,timeout:15000});}catch(e){}}
 const bootT=Date.now();
-const APPV='8.6';const WEBAPP=!window.Native&&/^https?:$/.test(location.protocol);
+const APPV='8.7';const WEBAPP=!window.Native&&/^https?:$/.test(location.protocol);
 if(WEBAPP){
   if('serviceWorker' in navigator)try{navigator.serviceWorker.register('sw.js');}catch(e){}
   let wl=null;const wake=async()=>{try{if(navigator.wakeLock&&document.visibilityState==='visible'&&!wl){wl=await navigator.wakeLock.request('screen');wl.addEventListener('release',()=>{wl=null;});}}catch(e){}};
@@ -193,10 +193,17 @@ if(WEBAPP){
   go.innerHTML=`<div style="font-size:12px;color:#E8B86D">RDR · RADAR</div><div style="font-size:30px;font-weight:800;border:2px solid #3DF58C;color:#3DF58C;padding:14px 26px">TAP TO START</div><div style="font-size:11px;color:#8a8a8a;line-height:1.8;max-width:330px">turns on voice + sound alerts and keeps the screen awake while you drive.${standalone?'':'<br><br><span style="color:#fff">FOR FULL SCREEN: tap Share <b>⎙</b> › Add to Home Screen, then open Radar from the home screen.</span>'}<br><br>keep Radar open on screen while driving — iPhone stops web apps when the screen locks.</div>`;
   document.body.appendChild(go);
   go.addEventListener('click',async()=>{
+    askMotion();
     try{actx=actx||new (window.AudioContext||window.webkitAudioContext)();await actx.resume();const o=actx.createOscillator(),g=actx.createGain();g.gain.value=0.0001;o.connect(g);g.connect(actx.destination);o.start();o.stop(actx.currentTime+0.05);}catch(e){}
     try{const u=new SpeechSynthesisUtterance('Radar on');u.lang='en-GB';u.volume=settings.voice?1:0;speechSynthesis.speak(u);}catch(e){}
-    try{if(window.DeviceMotionEvent&&DeviceMotionEvent.requestPermission)await DeviceMotionEvent.requestPermission();}catch(e){}
     wake();go.remove();webCacheAll();},{once:true});}
+/* iPhone: motion sensors (level, G, tilt) need an explicit allow, asked straight from a tap */
+const motionAsk=()=>!!(window.DeviceMotionEvent&&DeviceMotionEvent.requestPermission);
+function askMotion(){if(!motionAsk())return;try{DeviceMotionEvent.requestPermission().then(r=>{tilt.perm=r;if(r!=='granted')say('Motion blocked — close Radar fully, reopen it and tap Allow');if(typeof renderMenu==='function'&&document.getElementById('menu').style.display==='block')renderMenu();}).catch(()=>{tilt.perm='denied';});}catch(e){}
+  try{if(window.DeviceOrientationEvent&&DeviceOrientationEvent.requestPermission)DeviceOrientationEvent.requestPermission().catch(()=>{});}catch(e){}}
+window.askMotion=askMotion;
+/* what the level faces say when there is nothing to show */
+const tiltHint=()=>!tilt.at||Date.now()-tilt.at>3000?(motionAsk()?'MOTION OFF · MENU › ALLOW MOTION':'NO MOTION SENSOR DATA'):!tilt.gRef?null:'';
 /* save every map tile and camera file on the phone, so it works with no signal (runs once, in the background) */
 async function webCacheAll(){if(!window.caches||LS.get('webCached',0)===APPV)return;try{const list=await (await fetch('files.json',{cache:'no-store'})).json();const c=await caches.open('radar-'+APPV);
   for(let i=0;i<list.length;i+=40){await Promise.all(list.slice(i,i+40).map(async f=>{try{if(!(await c.match(f))){const r=await fetch(f);if(r.ok)await c.put(f,r);}}catch(e){}}));}LS.set('webCached',APPV);}catch(e){}}
@@ -210,7 +217,7 @@ let ltrail=LS.get('ltrail',[]);let ltrailAt=0;let altSm=null;
 /* tilt engine: gravity vector + learned forward axis -> roll/pitch */
 const tilt={gRef:LS.get('gRef',null),F:LS.get('fwd',null),g:[0,0,9.8],lin:[0,0,0],fwdAcc:[0,0,0],roll:0,pitch:0};
 const vdot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];const vcross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];const vnorm=v=>{const m=Math.hypot(v[0],v[1],v[2])||1;return [v[0]/m,v[1]/m,v[2]/m];};
-function levelHere(){tilt.gRef=tilt.g.slice();LS.set('gRef',tilt.gRef);flash('LEVEL SET');}
+function levelHere(){if(!tilt.at||Date.now()-tilt.at>3000){say(motionAsk()?'Motion sensors are off — tap ALLOW MOTION first':'No motion sensor data');return;}tilt.gRef=tilt.g.slice();LS.set('gRef',tilt.gRef);flash('LEVEL SET');}
 function learnFwd(dv){if(Math.abs(dv)<0.6)return;const a=tilt.lin;const m=Math.hypot(a[0],a[1],a[2]);if(m<0.5)return;const sg=Math.sign(dv);for(let i=0;i<3;i++)tilt.fwdAcc[i]=tilt.fwdAcc[i]*0.9+sg*a[i]/m*0.1;if(Math.hypot(tilt.fwdAcc[0],tilt.fwdAcc[1],tilt.fwdAcc[2])>0.35){tilt.F=vnorm(tilt.fwdAcc);LS.set('fwd',tilt.F);}}
 function computeTilt(){const U=vnorm(tilt.gRef||[0,0,1]);const u=vnorm(tilt.g);const F=tilt.F||[0,1,0];const fd=vdot(F,U);let Fp=vnorm([F[0]-U[0]*fd,F[1]-U[1]*fd,F[2]-U[2]*fd]);if(!isFinite(Fp[0]))Fp=[0,1,0];const R=vnorm(vcross(Fp,U));const cl=v=>Math.max(-1,Math.min(1,v));tilt.pitch=-Math.asin(cl(vdot(u,Fp)))*180/Math.PI;tilt.roll=Math.asin(cl(vdot(u,R)))*180/Math.PI;if(!tilt.gRef){tilt.pitch=0;tilt.roll=0;}}
 /* sunrise / sunset (NOAA-style approximation) */
@@ -386,7 +393,7 @@ const LOOKS=[
   /* lateral-g bar at the bottom right */
   o+=`<line x1="300" y1="290" x2="376" y2="290" stroke="${C.dim}" stroke-width="4"/><line x1="338" y1="286" x2="338" y2="294" stroke="${C.grey}"/><rect x="${338+Math.min(0,A.latG*60)}" y="288" width="${Math.abs(A.latG*60)}" height="4" fill="${c}"/>`;return o;}},
 {name:'TERMINAL',anim:true,draw(s,t){const f='Plex';const c=SC(s);const txt=s.status==='OVER'?C.red:'#d6d6d6';const d=dIn(s);let o='';
-  o+=T('> rdr  v8.6',30,28,14,C.grey,f)+T(s.clock,370,28,14,C.grey,f,{a:'end'})+T('spd',30,56,14,C.grey,f)+T(spd(),72,44,64,s.status==='OVER'?C.red:C.white,f,{w:'bold',lh:64})+T('km/h',72+String(spd()).length*39,76,14,C.grey,f);
+  o+=T('> rdr  v8.7',30,28,14,C.grey,f)+T(s.clock,370,28,14,C.grey,f,{a:'end'})+T('spd',30,56,14,C.grey,f)+T(spd(),72,44,64,s.status==='OVER'?C.red:C.white,f,{w:'bold',lh:64})+T('km/h',72+String(spd()).length*39,76,14,C.grey,f);
   o+=T('lim   '+limStr(s)+(s.avg!=null?'   avg '+s.avg:''),30,126,14,txt,f);const dl=deltaStr(s);const ok=s.delta!=null&&s.delta<=0;
   if(s.status==='OVER')o+=`<rect x="30" y="148" width="${('!! dlt '+dl+' OVER !!').length*8.4+8}" height="22" fill="${C.red}"/>`+T('!! dlt '+dl+' OVER !!',34,152,14,C.black,f);else o+=T('dlt   '+dl+(ok?' ok':''),30,150,14,ok?C.green:txt,f);
   const cl=!s.threat?'nxt   none within 10 km':s.status==='CLEAR'?'nxt   '+distStr(A.dist):'cam   '+distStr(d)+'  '+camLabel(s).toLowerCase()+(conf(s.threat.cam)>1?'  x'+conf(s.threat.cam):'');o+=T(cl,30,174,14,s.status==='CLEAR'?txt:c,f);
@@ -646,7 +653,8 @@ LOOKS.push(
   o+=`<rect x="60" y="262" width="280" height="22" rx="11" fill="none" stroke="#333" stroke-width="1.5"/><line x1="200" y1="258" x2="200" y2="288" stroke="#444"/><line x1="140" y1="262" x2="140" y2="284" stroke="#333"/><line x1="260" y1="262" x2="260" y2="284" stroke="#333"/>`;
   o+=`<circle cx="${200+Math.max(-130,Math.min(130,roll*4))}" cy="273" r="8" fill="${warn(roll)}"/>`;
   o+=T('MAX  R '+A.maxRoll.toFixed(0)+'°  P '+A.maxPitch.toFixed(0)+'°',30,300,11,G,f,{w:600,ls:2})+T(spd()+' KM/H · HDG '+hdgStr(),370,300,11,G,f,{w:600,ls:2,a:'end'});
-  if(!tilt.gRef)o+=T('MENU › LEVEL ON FLAT GROUND TO ZERO',200,328,11,C.amber,f,{w:700,ls:2,a:'middle'});
+  if(tiltHint())o+=T(tiltHint(),200,328,11,C.amber,f,{w:700,ls:2,a:'middle'});
+  else if(!tilt.gRef)o+=T('MENU › LEVEL ON FLAT GROUND TO ZERO',200,328,11,C.amber,f,{w:700,ls:2,a:'middle'});
   else if(Math.abs(roll)>=35||Math.abs(pitch)>=35)o+=T('!! ROLLOVER RISK !!',200,328,13,C.red,f,{w:800,ls:3,a:'middle'});
   else if(!tilt.F)o+=T('LEARNING FORWARD AXIS · ACCELERATE / BRAKE ONCE',200,328,10,G,f,{w:600,ls:1,a:'middle'});
   else o+=T(s.alt!=null?'ALT '+Math.round(s.alt)+' M':'',200,328,11,G,f,{w:600,ls:2,a:'middle'});o+=obdTag(200,346,f);
@@ -975,7 +983,7 @@ LOOKS.push(
   const st=s.status==='CLEAR'?'CLEAR':s.status==='CAM'?'CAMERA AHEAD':'SLOW DOWN';
   o+=T('ROLL '+(A.roll>=0?'R ':'L ')+Math.abs(A.roll).toFixed(0)+'°',bx,316,12,Wh,f,{w:'bold'})+T('PITCH '+(A.pitch>=0?'+':'−')+Math.abs(A.pitch).toFixed(0)+'°',bx,334,12,Wh,f,{w:'bold'})+T(st,cx,318,14,c,f,{w:'bold',a:'middle',ls:3})+T('G '+gStr(s.g)+(s.alt!=null?' · ALT '+Math.round(s.alt)+' M':''),cx,338,9,G,f,{a:'middle',ls:1});
   o+=T('HDG '+hdgStr(),W-bx,316,12,Wh,f,{w:'bold',a:'end'})+T(s.clock,W-bx,334,10,G,f,{a:'end'});
-  if(!tilt.gRef)o+=T('MENU › LEVEL ON FLAT GROUND',cx,62,9,C.amber,f,{a:'middle',ls:2});return o;}}
+  if(tiltHint())o+=T(tiltHint(),cx,62,9,C.amber,f,{a:'middle',ls:2});else if(!tilt.gRef)o+=T('MENU › LEVEL ON FLAT GROUND',cx,62,9,C.amber,f,{a:'middle',ls:2});return o;}}
 );
 /* tall screens (main screen held upright): the same extended views stacked above and below the face */
 function tallPanels(s,t,PH,font){const c=SC(s),G='#8a8a8a',W='#fff';let U='',D='';
@@ -1703,7 +1711,7 @@ function renderMenu(){const em=state?state.em:null;const mine=cams.filter(c=>c.u
   h+=`<h2>MARK CAMERA HERE</h2><div class="row"><button class="amb" onclick="markHere('F');closeMenu()">F FIXED</button><button class="amb" onclick="markHere('M');closeMenu()">M MOBILE</button><button class="amb" onclick="markHere('A');closeMenu()">A AVG</button><button class="amb" onclick="markHere('R');closeMenu()">R RED</button></div>`;
   h+=`<h2>DATA</h2><div class="row"><button onclick="refreshCams();closeMenu()">REFRESH OSM UAE</button><button onclick="document.getElementById('imp').click()">IMPORT CSV / GPX</button><button class="${demo.on?'red':''}" onclick="${demo.on?'demoStop()':'demoStart()'};closeMenu()">${demo.on?'STOP DEMO':'DEMO DRIVE'}</button></div>`;
   h+=`<h2>ALERTS · SCREEN</h2><div class="row"><button onclick="settings.sound=!settings.sound;saveSettings();renderMenu()">SOUND ${settings.sound?'ON':'OFF'}</button><button onclick="settings.haptic=!settings.haptic;saveSettings();renderMenu()">HAPTIC ${settings.haptic?'ON':'OFF'}</button><button onclick="beep(true);if(navigator.vibrate)navigator.vibrate([120,60,120])">TEST</button><button onclick="settings.dim=!settings.dim;saveSettings();applyDim();renderMenu()">NIGHT DIM ${settings.dim?'ON':'OFF'}</button><button onclick="settings.voice=!settings.voice;saveSettings();renderMenu();if(settings.voice)speak('Voice on')">VOICE ${settings.voice?'ON':'OFF'}</button><button onclick="settings.cycle=!settings.cycle;saveSettings();renderMenu()">AUTO CYCLE ${settings.cycle?'ON':'OFF'}</button><button onclick="nextRot()">ROTATE ${settings.rot==='auto'?'AUTO':settings.rot+'°'}</button></div>`;
-  h+=obdMenu2();h+=logMenu();h+=`<h2>OFF-ROAD</h2><div class="row"><button onclick="levelHere();renderMenu()">LEVEL (ZERO TILT)</button><button onclick="${settings.base?'settings.base=null':'settings.base=state&&state.gps?{lat:state.lat,lon:state.lon,t:Date.now()}:null'};saveSettings();renderMenu()">${settings.base?'CLEAR BASE':'SET BASE HERE'}</button><button onclick="ltrail=[];LS.set('ltrail',ltrail);renderMenu()">CLEAR TRAIL</button></div><p>Tilt: ${tilt.gRef?'zeroed':'NOT zeroed — park on flat ground and tap LEVEL'} · forward axis ${tilt.F?'learned':'learning (accelerate/brake once)'} · base ${settings.base?'set '+new Date(settings.base.t).toLocaleTimeString().slice(0,5):'none'} · trail ${ltrail.length} pts</p>`;
+  h+=obdMenu2();h+=logMenu();h+=`<h2>OFF-ROAD</h2><div class="row">${motionAsk()&&(!tilt.at||Date.now()-tilt.at>3000)?'<button class="wht" onclick="askMotion()">ALLOW MOTION</button>':''}<button onclick="levelHere();renderMenu()">LEVEL (ZERO TILT)</button><button onclick="${settings.base?'settings.base=null':'settings.base=state&&state.gps?{lat:state.lat,lon:state.lon,t:Date.now()}:null'};saveSettings();renderMenu()">${settings.base?'CLEAR BASE':'SET BASE HERE'}</button><button onclick="ltrail=[];LS.set('ltrail',ltrail);renderMenu()">CLEAR TRAIL</button></div><p>Tilt: ${tilt.gRef?'zeroed':'NOT zeroed — park on flat ground and tap LEVEL'} · forward axis ${tilt.F?'learned':'learning (accelerate/brake once)'} · base ${settings.base?'set '+new Date(settings.base.t).toLocaleTimeString().slice(0,5):'none'} · trail ${ltrail.length} pts</p>`;
   h+=`<h2>FLASH ZONES · hold the face 2 s when the radar actually fires</h2><p>${flashes.length} marked · ${(()=>{const m=meanAlong();return m!=null?'learned: it fires ~'+Math.round(m)+' m before the mapped camera, applied to unmarked cameras as an estimate (~)':'no pattern learned yet';})()}${flashes.length?' · <button onclick="flashes.pop();LS.set(\'flashes\',flashes);renderMenu()">UNDO LAST</button>':''}</p>`;
   if(log.length){h+=`<h2>LOG · last passes</h2><table>`;for(const e of log.slice(0,10)){const dt=new Date(e.t);h+=`<tr><td>${pad2(dt.getHours())}:${pad2(dt.getMinutes())}</td><td>${TYPES[e.type]||e.type}</td><td style="color:${e.over?'#FF3B3B':'#3DF58C'}">${e.spd} km/h</td><td>${e.trig!=null?'at '+e.trig:''}${e.fp?' · FZ':''}</td></tr>`;}h+=`</table>`;}
   h+=`<h2>CAR · drawn on every face</h2><div class="row"><button class="${settings.car!=='A220'?'wht':''}" onclick="setCar('JK')">JEEP WRANGLER JK</button><button class="${settings.car==='A220'?'wht':''}" onclick="setCar('A220')">MERCEDES A 220</button></div>`;
@@ -1741,7 +1749,7 @@ function offlineRoads(lat,lon){if(!OFF.idx)return false;const c=OFF.cell,ix=Math
 
 /* ============================================================ go */
 applyDim();tick();setInterval(()=>{window.__tk=Date.now();tick();},1000);requestAnimationFrame(render);
-(function(){const b=document.getElementById('boot');const lines=['RDR  v8.6','','GPS ........ '+(loc.anyAt?'OK':'WAIT'),'CAMS ....... '+cams.length,'FLASH ZONES  '+flashes.length,'ROADS ...... '+(roads?'CACHED':'NONE'),'FACES ...... '+LOOKS.length,'ALERTS ..... '+(settings.sound?'SND ':'')+(settings.haptic?'HAP ':'')+(settings.voice?'VOX':''),'','READY'];let i=0;const iv=setInterval(()=>{b.textContent+=lines[i]+'\n';i++;if(i>=lines.length){clearInterval(iv);setTimeout(()=>b.style.display='none',450);}},150);b.addEventListener('pointerdown',()=>{clearInterval(iv);b.style.display='none';});})();
+(function(){const b=document.getElementById('boot');const lines=['RDR  v8.7','','GPS ........ '+(loc.anyAt?'OK':'WAIT'),'CAMS ....... '+cams.length,'FLASH ZONES  '+flashes.length,'ROADS ...... '+(roads?'CACHED':'NONE'),'FACES ...... '+LOOKS.length,'ALERTS ..... '+(settings.sound?'SND ':'')+(settings.haptic?'HAP ':'')+(settings.voice?'VOX':''),'','READY'];let i=0;const iv=setInterval(()=>{b.textContent+=lines[i]+'\n';i++;if(i>=lines.length){clearInterval(iv);setTimeout(()=>b.style.display='none',450);}},150);b.addEventListener('pointerdown',()=>{clearInterval(iv);b.style.display='none';});})();
 if(!window.NO_BUNDLE){loadScript('data/cams.js');loadScript('data/emirates.js');loadScript('data/roads/index.js');}
 setTimeout(()=>{if(cams.length===0||Date.now()-settings.osmPull>30*24*3600*1000)refreshCams(true);},8000);
 </script>
